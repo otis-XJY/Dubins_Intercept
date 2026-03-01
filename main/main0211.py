@@ -35,6 +35,8 @@ from intercept.IsoPair.obtainIsoPath import insertIsoMapP2TP
 # parser.add_argument('--nodraw', action='store_true', help='如果指定则不进行绘图，直接返回结果')
 # args = parser.parse_args()
 
+# === 1. 视频保存配置 (在循环开始前) ===
+output_video_name = 'uav_interception_v2.mp4'
 TimeMap='_0211_2245'
 TimeIso='_0212_1200'
 
@@ -54,6 +56,10 @@ PathE2Val_true=joblib.load('PathE2Val_true'+TimeIso+'.jbl')
 
 IsoMapTP2Val_i_tt = joblib.load('IsoMapTP2Val_i_tt'+TimeMap+'.jbl')
 pathFinalTP2Val = joblib.load('pathFinalTP2Val'+TimeMap+'.jbl')
+
+length_E_max=0
+for i in range(len(pathFinalE2ValIn)):
+    length_E_max=max(length_E_max,len(pathFinalE2ValIn[i][0][0]))
 
 IsoMapETP2Iso_i_tt=joblib.load('IsoMapETP2Iso_i_tt'+TimeMap+'.jbl')
 IsoMapEIso2TP_i_tt=joblib.load('IsoMapEIso2TP_i_tt'+TimeMap+'.jbl')
@@ -293,8 +299,7 @@ IsoMapETP2Val_i_tt_timeShift = IsoMapE2ValIn_i_tt.copy()
 # === 【视频保存配置】 ===
 # ... (前面的数据加载和初始化代码保持不变) ...
 
-# === 1. 视频保存配置 (在循环开始前) ===
-output_video_name = 'uav_interception_v2.mp4'
+
 metadata = dict(title='UAV Swarm Interception', artist='Python_Simulation')
 # fps 建议设置为 20-30，根据你 t_all % 200 的跳帧频率调整
 import matplotlib.pyplot as plt
@@ -318,7 +323,7 @@ with writer.saving(fig, output_video_name, dpi=100):
     # 假设 steps_size, v_P, v_E, timeIsoRes 等变量已定义
     UnCapPid=np.array([i for i in range(num_P)])
     UnCapEid=np.array([i for i in range(num_E)])
-    while not np.all(distances < CapDist):
+    while (not np.all(distances < CapDist)) and (t_all < length_E_max /v_E):
 
         # --- 1. 时间更新 ---
         t += TimeRes / Stepsize
@@ -327,8 +332,9 @@ with writer.saving(fig, output_video_name, dpi=100):
         # --- 2. 确定未拦截的 E 和 P ---
         Capflag = distances < CapDist
         # pairs_realE2P: [Eid, Pid] (注意保持 ID 对应关系)
-        UnCapPidNew = np.sort(pairs_realE2P[~Capflag, 1].astype(int))
-        UnCapEidNew = np.sort(pairs_realE2P[~Capflag, 0].astype(int))  # 保持未捕获 Evader 的 ID 顺序
+        if pairs_realE2P.shape[0]==Capflag.shape[0]:
+            UnCapPidNew = np.sort(pairs_realE2P[~Capflag, 1].astype(int))
+            UnCapEidNew = np.sort(pairs_realE2P[~Capflag, 0].astype(int))  # 保持未捕获 Evader 的 ID 顺序
         # 假设在进入循环前已初始化这些变量为 None
         # IsoMapPTP2Iso_i_tt_timeShift = None 
         # IsoMapETP2Val_i_tt_timeShift = None
@@ -363,7 +369,7 @@ with writer.saving(fig, output_video_name, dpi=100):
             for eid in UnCapEidNew])
 
         PathEpre=[None]*len(UnCapEidNew)
-        if len(Capflag)==len(UnCapEidNew):
+        if len(Capflag)==len(UnCapEidNew) and pairs_realE2P.shape[0]==Capflag.shape[0]:
             PathEpre=PathE
         else:
             for id,eid in enumerate(UnCapEidNew):
@@ -684,6 +690,7 @@ with writer.saving(fig, output_video_name, dpi=100):
         # --- 5. 刷新画布 ---
             ax.set_title(f"Simulation Time: {t_all:.2f}")
             plt.grid(True, linestyle='--', alpha=0.5)
+            # plt.show()
             
             # 重要：捕获当前帧
             writer.grab_frame()
@@ -694,8 +701,8 @@ with writer.saving(fig, output_video_name, dpi=100):
 
         # 更新距离用于循环判断
         distances = np.linalg.norm(
-            PosP[pairs_realE2P_[:, 1].astype(int), :2] - 
-            PosE[pairs_realE2P_[:, 0].astype(int), :2], 
+            PosP[:, :2] - 
+            PosE[:, :2], 
             axis=1
         )
 
@@ -706,7 +713,7 @@ len_e_true = int(t_all * v_E)
 len_p_true = int(t_all * v_P)
 
 for eid in range(num_E):
-    PosEfinal=PathE2Val_true[eid][len_e_true-1, :]
+    PosEfinal=PathE2Val_true[eid][min(len_e_true-1, PathE2Val_true[eid].shape[0]-1), :]
 
     plt.plot(PathE2Val_true[eid][:len_e_true, 0], PathE2Val_true[eid][:len_e_true, 1], 
             '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1)
@@ -719,7 +726,7 @@ for eid in range(num_E):
 
 
 for pid in range(num_P):
-    PosPfinal=PathPtrue[pid][:, len_p_true-1]
+    PosPfinal=PathPtrue[pid][:, min(len_p_true-1, PathPtrue[pid].shape[1]-1)]
 
     plt.plot(PathPtrue[pid][0, :len_p_true], PathPtrue[pid][1, :len_p_true], 
             '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1)

@@ -1,8 +1,16 @@
 import numpy as np
 
-def obtainNearETP(Trans_Point_2D, PosE, ValuePos, pairsE2Val):
+def obtainNearETP(Trans_Point_2D, PosE, ValuePos, pairsE2Val, weight_perp=1.0, weight_path=1.0):
     """
     全向量化寻找最接近路径段的转移点 (TP)
+    
+    综合考虑两个因素：
+    1. Trans_Point 到线段 PosE-ValuePos 的垂直距离 (dist_perp)
+    2. 折线距离：PosE -> Trans_Point -> ValuePos 的总路径距离 (dist_path)
+    
+    参数:
+    - weight_perp: 垂直距离的权重 (默认1.0)
+    - weight_path: 折线距离的权重 (默认1.0)
     """
     # 1. 提取坐标 (调整为 0-based 索引)
     # pairsE2Val 第一列是 Eid, 第二列是 Valid
@@ -18,7 +26,7 @@ def obtainNearETP(Trans_Point_2D, PosE, ValuePos, pairsE2Val):
     D = B_all - A_all
     D_mag_sq = np.sum(D**2, axis=1, keepdims=True) + eps # (M, 1)
 
-    # 提取转移点坐标 (N, 1)
+    # 提取转移点坐标 (N, 2)
     Px = Trans_Point_2D[:, 0]
     Py = Trans_Point_2D[:, 1]
 
@@ -36,6 +44,18 @@ def obtainNearETP(Trans_Point_2D, PosE, ValuePos, pairsE2Val):
                  D[:, [1]] * (A_all[:, [0]] - Px[np.newaxis, :])) # (M, N)
     dist_perp = num / np.sqrt(D_mag_sq) # (M, N)
 
+    # --- 4b. 计算折线距离：PosE -> Trans_Point -> ValuePos ---
+    # Trans_Point 到 PosE 的距离: (M, N)
+    dist_PE = np.sqrt((Px[np.newaxis, :] - A_all[:, [0]])**2 + 
+                      (Py[np.newaxis, :] - A_all[:, [1]])**2)
+    
+    # Trans_Point 到 ValuePos 的距离: (M, N)
+    dist_TV = np.sqrt((Px[np.newaxis, :] - B_all[:, [0]])**2 + 
+                      (Py[np.newaxis, :] - B_all[:, [1]])**2)
+    
+    # 折线总距离
+    dist_path = dist_PE + dist_TV
+
     # --- 5. 引入惩罚项 ---
     # outside_mask: (M, N) 类型的布尔矩阵
     outside_mask = (t < 0) | (t > 1)
@@ -44,9 +64,19 @@ def obtainNearETP(Trans_Point_2D, PosE, ValuePos, pairsE2Val):
     # 只要在 [0, 1] 之外，增加 1e6 的极大偏移量
     penalty = np.where(outside_mask, 1e6 + 100 * dist_perp, 0.0)
     
-    total_score = dist_perp + penalty
+    # --- 5b. 归一化两个距离指标 (考虑量纲差异) ---
+    # 计算 dist_perp 和 dist_path 的最大值用于归一化
+    dist_perp_max = np.max(dist_perp) + eps
+    dist_path_max = np.max(dist_path) + eps
+    
+    # 归一化到 [0, 1] 范围
+    dist_perp_norm = dist_perp / dist_perp_max
+    dist_path_norm = dist_path / dist_path_max
+    
+    # --- 6. 组合两个指标 ---
+    total_score = weight_perp * dist_perp_norm + weight_path * dist_path_norm + penalty
 
-    # --- 6. 寻优 (axis=1 代表在 TP 维度找最小值) ---
+    # --- 7. 寻优 (axis=1 代表在 TP 维度找最小值) ---
     min_idx = np.argmin(total_score, axis=1) # (M,)
     
     # 提取结果
