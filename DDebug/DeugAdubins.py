@@ -20,7 +20,7 @@ from intercept.IsoMap.DrawIso import draw_iso
 # parser.add_argument('--nodraw', action='store_true', help='如果指定则不进行绘图，直接返回结果')
 # args = parser.parse_args()
 import joblib 
-TimeMap='_0211_2245'
+TimeMap='_0302_1940'
 TimeIso=TimeMap
 Map = joblib.load('Map'+TimeMap+'.jbl')	
       

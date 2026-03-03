@@ -30,16 +30,24 @@ def obtainPath(close, vthetaAllP, verse):
             path_x.extend(close[numNode - 1]['path'][le][0])
             path_y.extend(close[numNode - 1]['path'][le][1])
 
-    # 转换为numpy数组
-    path_x = np.array(path_x)
-    path_y = np.array(path_y)
+    # 转换为numpy数组，使用float32节省内存，并四舍五入到小数点后两位
+    path_x = np.round(np.array(path_x, dtype=np.float32), 2)
+    path_y = np.round(np.array(path_y, dtype=np.float32), 2)
+    
+    # 处理vthetaAllP，转换为float32并四舍五入
+    vthetaAllP = np.round(np.asarray(vthetaAllP, dtype=np.float32), 4)
 
     if verse == 0:
         # 正向
         path = np.vstack([path_x, path_y, vthetaAllP])
     else:
         # 反向
-        path = np.vstack([np.flip(path_x), np.flip(path_y), np.flip(vthetaAllP)])
+        path = np.vstack([np.round(np.flip(path_x), 2), 
+                         np.round(np.flip(path_y), 2), 
+                         np.round(np.flip(vthetaAllP), 4)])
 
+    # 确保最终结果是float32格式
+    path = np.asarray(path, dtype=np.float32)
+    
     return path
 

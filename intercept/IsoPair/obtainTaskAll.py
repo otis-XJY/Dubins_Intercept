@@ -49,6 +49,7 @@ def obtainCost(flattened_pairs, pathidP):
     cost_L = param_L * Delta_L / (max_L + eps)
     
     # 拦截点距离部分: Sigmoid 函数
+    # CapDist以内为1,CapDist~CapDistTime为0-1,CapDistTime随着时间变为CapDist
     cost_d = param_d * 1.0 / (1.0 + np.exp(-0.1381 * (Delta_d - 50.0)))
     
     # 朝向部分: 正弦映射

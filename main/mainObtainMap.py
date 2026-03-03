@@ -11,7 +11,6 @@ matplotlib.use('TkAgg')  # 强制使用TkAgg后端
 import numpy as np
 import matplotlib.pyplot as plt
 from intercept.Map.obtainMap import obtainMap
-from intercept.IsoMap.WH_main_obtainMap import WH_main_obtainMapP
 
 import joblib  # 必须先安装 pip install joblib
 import gc
@@ -87,8 +86,8 @@ Map['Trans_Point'] = Trans_Point
 # Map['E_TranPoint'] = E_TranPoint
 
 # 调用 obtainMap 函数
-Map = obtainMap(Map)
-TimeMap='_0211_2245'
+Map = obtainMap(Map, n_topo=15, n_blank=15, safety=20.0)
+TimeMap='_0302_1940'
 SaveName = 'Map'+TimeMap
 
 fast_save(Map, 'Map',TimeMap)

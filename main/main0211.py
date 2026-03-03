@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import sys
 import os
+from datetime import datetime
 import numpy as np
 import joblib
 import numpy as np
@@ -36,9 +37,17 @@ from intercept.IsoPair.obtainIsoPath import insertIsoMapP2TP
 # args = parser.parse_args()
 
 # === 1. 视频保存配置 (在循环开始前) ===
-output_video_name = 'uav_interception_v2.mp4'
-TimeMap='_0211_2245'
-TimeIso='_0212_1200'
+# 使用系统当前时间生成文件名（格式：MMDD_HHMM）
+current_time = datetime.now().strftime('%m%d_%H%M')
+
+# 创建output文件夹（如果不存在）
+output_dir = 'output'
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+
+output_video_name = os.path.join(output_dir, f'uav_interception_{current_time}.mp4')
+TimeMap='_0302_1940'
+TimeIso='_0302_2050'
 
 
 Map = joblib.load('Map'+TimeMap+'.jbl')	
@@ -333,8 +342,9 @@ with writer.saving(fig, output_video_name, dpi=100):
         Capflag = distances < CapDist
         # pairs_realE2P: [Eid, Pid] (注意保持 ID 对应关系)
         if pairs_realE2P.shape[0]==Capflag.shape[0]:
-            UnCapPidNew = np.sort(pairs_realE2P[~Capflag, 1].astype(int))
-            UnCapEidNew = np.sort(pairs_realE2P[~Capflag, 0].astype(int))  # 保持未捕获 Evader 的 ID 顺序
+            UnCapPidNew = pairs_realE2P[~Capflag, 1].astype(int)
+            UnCapEidNew = pairs_realE2P[~Capflag, 0].astype(int)
+            pairs_realE2P=pairs_realE2P[~Capflag] # 保持未捕获 Evader 的 ID 顺序
         # 假设在进入循环前已初始化这些变量为 None
         # IsoMapPTP2Iso_i_tt_timeShift = None 
         # IsoMapETP2Val_i_tt_timeShift = None
@@ -369,15 +379,11 @@ with writer.saving(fig, output_video_name, dpi=100):
             for eid in UnCapEidNew])
 
         PathEpre=[None]*len(UnCapEidNew)
-        if len(Capflag)==len(UnCapEidNew) and pairs_realE2P.shape[0]==Capflag.shape[0]:
-            PathEpre=PathE
-        else:
-            for id,eid in enumerate(UnCapEidNew):
-            # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
-                PathEpre[id] = PathE[np.where(eid==UnCapEid)[0][0]]
+        for id,eid in enumerate(UnCapEidNew):
+        # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
+            PathEpre[id] = PathE[np.where(eid==UnCapEid)[0][0]]
 
-        UnCapEid=UnCapEidNew
-        UnCapPid=UnCapPidNew
+
     #########################################################
         # 注：如果 PathE2Val_true 的结构是 (2 x Time)，则改为：
         # PathE2Val_true[i][:, min(...)]
@@ -385,7 +391,7 @@ with writer.saving(fig, output_video_name, dpi=100):
         # 调用 DWA 子函数
         min_dists, BestPaths = obtainDWAprePath(PosE, PathEpre, E_PreRef)
 
-        flagIn = 1 if np.all(min_dists <= CapDist / 5) else 0
+        flagIn = 1 if np.all(min_dists <= CapDist) else 0
 
         # --- 5. 重新规划逻辑 ---
         if not flagIn:
@@ -396,13 +402,16 @@ with writer.saving(fig, output_video_name, dpi=100):
             res = predictLikelyTargetNew(traj, targets)
             Validnew = res['rank_idx'][:, 0]
             pairsE2Val_ = np.column_stack((np.arange(len(Validnew)), Validnew))
-            pairsE2Val=pairsE2Val_[UnCapEid, :]       
+            pairsE2Val=pairsE2Val_[UnCapEidNew, :]       
 
             # 检查是否需要触发重规划
             NearTPpos_E, NearTPid_E = obtainNearETP(Trans_Point[:, :2], PosE, ValuePos, pairsE2Val)
             
             
             if not np.array_equal(NearTPid_E, EfromTPid) or not np.array_equal(Validnew, Valid):
+            # if True:
+                UnCapEid=UnCapEidNew
+                UnCapPid=UnCapPidNew
                 flagPlot=1
                 Valid = Validnew
                 EfromTPid = NearTPid_E
@@ -547,7 +556,7 @@ with writer.saving(fig, output_video_name, dpi=100):
 
                 ICFinal = AssignedIntercepts.copy()  # 保持变量名一致
                 pairs_realE2P=np.array([[UnCapEid[pairs_realE2P_[i,0].astype(int)],UnCapPid[pairs_realE2P_[i,1].astype(int)] ]
-                                for i in range(len(UnCapPid))])
+                                for i in range(len(pairs_realE2P_))])
 
                 # 更新 TimeShift 缓存列表 (List Comprehension 处理对象)
                 IsoMapPTP2Iso_i_tt_timeShift = [IsoMap_i_tt_P2Iso[i] for i in p_indices]
@@ -617,7 +626,7 @@ with writer.saving(fig, output_video_name, dpi=100):
                      obs_no_circle, obs_no_circle_in, ax=ax)
 
             # --- 2. 准备颜色集 (使用 tab20 提供更多对比度) ---
-            numIntercepts = len(UnCapEid)
+            numIntercepts = len(UnCapEidNew)
             # tab20 每两个颜色为一组同色系，适合表示 Pursuer-Evader 对
             color_map = mpl.colormaps['tab20'] 
 
@@ -625,7 +634,7 @@ with writer.saving(fig, output_video_name, dpi=100):
             ax.scatter(Evader[:, 0], Evader[:, 1], c='gray', marker='d', s=20, alpha=0.5, label='Evader Start')
             
             # --- 4. 遍历每个拦截任务绘图 ---
-            for idx, eid in enumerate(UnCapEid):
+            for idx, eid in enumerate(UnCapEidNew):
                 # 为每组任务分配 tab20 中的一对颜色
                 # color_p (追捕者): 深色； color_e (逃避者): 浅色
                 color_p = color_map((idx * 2) % 20)
@@ -706,6 +715,9 @@ with writer.saving(fig, output_video_name, dpi=100):
             axis=1
         )
 
+        if np.all(distances < CapDist):
+            print(f"All evaders captured at time {t_all:.2f} seconds.")
+
 
 plt.figure(figsize=(10, 8))
 Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in, ax)
@@ -734,3 +746,6 @@ for pid in range(num_P):
     plt.quiver(PosPfinal[0], PosPfinal[1], 150*np.cos(PosPfinal[2]), 150*np.sin(PosPfinal[2]), 
             color=color_p, angles='xy', scale_units='xy', scale=1, width=0.004, alpha=0.8)
 
+
+
+print("Simulation completed and video saved as:", output_video_name)

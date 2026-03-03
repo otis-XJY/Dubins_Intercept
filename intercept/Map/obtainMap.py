@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 from Draw.Draw_map import Draw_map
 from intercept.Map.obtain_obs_no_circle_all import obtain_obs_no_circle_all
 from intercept.Map.computePotentialField import computePotentialField
-from intercept.Map.samplePointsBasedOnPotentialField import samplePointsBasedOnPotentialField
+# from Map.samplePointsBasedOnPotentialField import samplePointsBasedOnPotentialField
+from intercept.Map.PaperPoint0302 import samplePointsBasedOnPotentialField
 from intercept.Map.obtain_finalObs import obtain_finalObs
 import time
 import os
@@ -13,7 +14,7 @@ import matplotlib.pyplot as plt
 from shapely.geometry import Polygon, Point, LineString
 from scipy.spatial import Voronoi, Delaunay
 from sklearn.cluster import KMeans
-def obtainMap(Map):
+def obtainMap(Map, n_topo=10, n_blank=100, safety=20.0):
     """
     生成地图环境，包括障碍物、势场和采样点
 
@@ -99,9 +100,9 @@ def obtainMap(Map):
     obstacle_list=obs_no_circleTP, 
     value_positions=ValuePos[:,:2], 
     start_positions=PStart_Point[:,:2], 
-    n_topo=15, 
-    n_blank=10, 
-    safety=20.0,
+    n_topo=n_topo, 
+    n_blank=n_blank, 
+    safety=safety,
     min_node_spacing=None
 )
 
@@ -154,8 +155,19 @@ def obtainMap(Map):
     sampled_points = sampled_points[removeEndPointAll == 0]
 
     # 设置过渡点角度
-    angles = (np.pi / 2) * np.ones(len(sampled_points))
+    # angles = (np.pi / 2) * np.ones(len(sampled_points))
+    # Trans_Point = np.column_stack([sampled_points, angles])
+  
+    # 提取对应于 sampled_points 的优化后朝向 (从 setAll 中)
+    # setAll['orientations'] 对应于 all_nodes 的顺序: anchors + bottlenecks + coverage
+    n_anchors = len(setAll['anchors'])
+    orientations_sampled = setAll['orientations'][n_anchors:]  # bottlenecks + coverage 的朝向
+    orientations_sampled = orientations_sampled[removeEndPointAll == 0]  # 同步过滤
+    
+    # 将度数转换为弧度
+    angles = np.deg2rad(orientations_sampled)
     Trans_Point = np.column_stack([sampled_points, angles])
+    print('Trans_Point shape:', Trans_Point.shape)
 
     # 绘制最终地图
     plt.figure(figsize=(10, 8))

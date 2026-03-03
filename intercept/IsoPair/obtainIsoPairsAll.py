@@ -52,7 +52,7 @@ def obtainIsoPairs(IsoEpos, IsoPpos, PosE, PosP, threshold, ValuePos, pairs, Eid
 
     # --- Step 3. 距离判断 ---
     dist = np.hypot(dx, dy)
-    validMask = validAngleMask & (dist <= threshold)
+    validMask = validAngleMask & (dist < threshold)
 
     # 计算 E 到目标点 (ValuePos) 的距离
     target_pos_idx = int(pairs[Eid, 1])

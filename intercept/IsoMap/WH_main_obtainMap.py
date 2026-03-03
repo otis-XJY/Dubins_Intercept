@@ -63,10 +63,12 @@ def WH_main_obtainMapP(Map, draw=True, draw_interactive=False):
             vthetaAll_ = []
 
     # 生成每个无人机在不同时间点的轨迹
-    IsoMapP_i_tt = [[{} for _ in range(Map['numTime'])] for _ in range(len(PStart_Point[:, 1]))]
     Maxlength = max(lengthPathP) if len(lengthPathP) > 0 else 0
+    numTime =max(Maxlength* Stepsize//250 if Maxlength > 0 else Map['numTime'], Map['numTime'])
+    Map['numTime']=numTime
+    IsoMapP_i_tt = [[{} for _ in range(numTime)] for _ in range(len(PStart_Point[:, 1]))]
     v_P = Map['v_P']
-    numTime = Map['numTime']
+
 
     timePlot = np.linspace(1, Maxlength / v_P, numTime) if Maxlength > 0 else np.linspace(1, 1, numTime)
     time = timePlot * Stepsize
@@ -91,9 +93,9 @@ def WH_main_obtainMapP(Map, draw=True, draw_interactive=False):
                     pathid.append([i, j, round(v_P * timePlot[tt])-1])
 
             IsoMapP_i_tt[i][tt] = IsoMapData(
-                IsoPos=np.array(IsoPos).T if len(IsoPos) > 0 else np.array([[]]),
-                pathid=np.array(pathid),
-                IsoVtheta=np.array(IsoVtheta)
+                IsoPos=np.round(np.array(IsoPos, dtype=np.float32), 2).T if len(IsoPos) > 0 else np.array([[]]),
+                pathid=np.array(pathid, dtype=np.int32),
+                IsoVtheta=np.round(np.array(IsoVtheta, dtype=np.float32), 4)
             )            
     # 如果需要绘图，调用 DrawIso 模块进行绘制
     if draw:
@@ -186,7 +188,7 @@ def WH_main_obtainMapRef(Map, PointFrom, PointTo, flagAll):
                             else:
                                 vtheta_list.append(k_theta)
                 
-                vthetaAllE[i, j] = np.array(vtheta_list)
+                vthetaAllE[i, j] = np.round(np.array(vtheta_list, dtype=np.float32), 4)
 
     end_time = time.time()
     print(f"路径计算完成，耗时: {end_time - start_time:.4f} 秒")
@@ -248,9 +250,9 @@ def WH_main_obtainIso(Map, v, final_pathE, vthetaAllE, verse):
             
             # 创建字典，存储数据
             IsoMapTP2Iso_i_tt[i][tt] = IsoMapData(
-                IsoPos=np.array(IsoPos).T if len(IsoPos) > 0 else np.array([[]]),
-                pathid=np.array(pathid),
-                IsoVtheta=np.array(IsoVtheta)
+                IsoPos=np.round(np.array(IsoPos, dtype=np.float32), 2).T if len(IsoPos) > 0 else np.array([[]]),
+                pathid=np.array(pathid, dtype=np.int32),
+                IsoVtheta=np.round(np.array(IsoVtheta, dtype=np.float32), 4)
             )
     
     IsoMapIso2TP_i_tt = [[{} for _ in range(Map['numTime'])] for _ in range(ii)]
@@ -275,9 +277,9 @@ def WH_main_obtainIso(Map, v, final_pathE, vthetaAllE, verse):
                 
                 # 创建字典，存储数据
                 IsoMapIso2TP_i_tt[i][tt] = IsoMapData(
-                    IsoPos=np.array(IsoPos).T if len(IsoPos) > 0 else np.array([[]]),
-                    pathid=np.array(pathid),
-                    IsoVtheta=np.array(IsoVtheta)
+                    IsoPos=np.round(np.array(IsoPos, dtype=np.float32), 2).T if len(IsoPos) > 0 else np.array([[]]),
+                    pathid=np.array(pathid, dtype=np.int32),
+                    IsoVtheta=np.round(np.array(IsoVtheta, dtype=np.float32), 4)
                 )
 
     return pathFinal, IsoMapTP2Iso_i_tt,IsoMapIso2TP_i_tt
