@@ -1,9 +1,16 @@
 import numpy as np
 
-def obtainIsoPairs(IsoEpos, IsoPpos, PosE, PosP, threshold, ValuePos, pairs, Eid, ETP2Val_IsoPosId):
+def obtainIsoPairs(IsoEpos, IsoPpos, tall, CapRef, pid, ValuePos, pairs, Eid, ETP2Val_IsoPosId):
     """
     Python 版拦截点对计算函数
     """
+
+    CapDistTime = CapRef['CapDistTime'][pid]
+    CapAngleTime = CapRef['CapAngleTime'][pid]/2
+    v_E = CapRef['v_E']
+    timeIsoRes= CapRef['timeIsoRes']
+    Stepsize = CapRef['Stepsize']
+    
     # 如果输入为空，直接返回
     if IsoEpos is None or IsoPpos is None or IsoEpos.size == 0 or IsoPpos.size == 0:
         return np.array([])
@@ -43,17 +50,29 @@ def obtainIsoPairs(IsoEpos, IsoPpos, PosE, PosP, threshold, ValuePos, pairs, Eid
     angleDiff = (angleDiff_ + 180) % 360 - 180
     
     # 计算方向代价
-    costDirection = np.abs(angleDiff) / 43.5
+    costDirection = np.abs(angleDiff) / CapAngleTime
     # 注意：在 Python 中我们后面直接用 Mask 过滤，不必特意转成 NaN
 
-    validAngleMask = np.abs(angleDiff) <= 43.5
-    if not np.any(validAngleMask):
-        return np.array([])
+    validAngleMask = np.abs(angleDiff) <= CapAngleTime
+
+    # if not np.any(validAngleMask):
+    #     return np.array([])
 
     # --- Step 3. 距离判断 ---
     dist = np.hypot(dx, dy)
-    validMask = validAngleMask & (dist < threshold)
+    timeDelay = tall[0] - tall[1]  # te - tp
 
+    timeMask = (timeDelay >= 0) | (
+        (timeDelay < 0) & (dist <= CapDistTime) & ((-timeDelay)*timeIsoRes * v_E <= (CapDistTime - dist))
+    )
+
+    validMask = validAngleMask & timeMask & (dist <= CapDistTime)
+
+
+
+
+
+    
     # 计算 E 到目标点 (ValuePos) 的距离
     target_pos_idx = int(pairs[Eid, 1])
     # 如果 MATLAB 中 pairs(Eid,2) 是 1-based 索引，这里需要 -1，视项目习惯而定
@@ -92,7 +111,7 @@ def obtainIsoPairs(IsoEpos, IsoPpos, PosE, PosP, threshold, ValuePos, pairs, Eid
 
 import numpy as np
 
-def obtainPTP2TP_IsoPos_timeShift2(Pid, Eid, tp, te, PosP, PosE, CapDist, IsoMap_i_tt_insertedP, IsoMap_i_tt_insertedE, ValuePos, pairs):
+def obtainPTP2TP_IsoPos_timeShift2(Pid, Eid, tp, te, CapRef, v_E, CapDist, IsoMap_i_tt_insertedP, IsoMap_i_tt_insertedE, ValuePos, pairs):
     """
     根据时间偏移提取等时面点对 (Time-Shifted IsoPairs)
     """
@@ -130,9 +149,9 @@ def obtainPTP2TP_IsoPos_timeShift2(Pid, Eid, tp, te, PosP, PosE, CapDist, IsoMap
     output = obtainIsoPairs(
         ETP2Val_IsoPos_te, 
         PTP2TP_IsoPos_tp, 
-        PosE[int(Eid), :], 
-        PosP[int(Pid), :], 
-        CapDist, 
+        [te,tp], 
+        CapRef, 
+        int(Pid), 
         ValuePos, 
         pairs, 
         Eid, 

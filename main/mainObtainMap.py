@@ -27,9 +27,7 @@ import time
 # 初始化 Map 字典
 Map = {}
 
-# 设置 UAV 和时间相关参数
-Map['v_E'] = 200  # m/s
-Map['v_P'] = 200  # m/s
+
 Map['numTime'] = 50  # 时间分割数量
 
 # 设置路径规划相关参数
@@ -87,7 +85,7 @@ Map['Trans_Point'] = Trans_Point
 
 # 调用 obtainMap 函数
 Map = obtainMap(Map, n_topo=15, n_blank=15, safety=20.0)
-TimeMap='_0302_1940'
+TimeMap='_0305_1800'
 SaveName = 'Map'+TimeMap
 
 fast_save(Map, 'Map',TimeMap)

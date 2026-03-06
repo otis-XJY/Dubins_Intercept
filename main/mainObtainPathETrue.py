@@ -27,8 +27,8 @@ def fast_save(obj, name_, TimeIso_):
 # parser = argparse.ArgumentParser()
 # parser.add_argument('--nodraw', action='store_true', help='如果指定则不进行绘图，直接返回结果')
 # args = parser.parse_args()
-TimeMap='_0302_1940'
-TimeIso='_0302_2050'
+TimeMap='_0305_1800'
+TimeIso='_0305_1800'
 
 Map = joblib.load('Map'+TimeMap+'.jbl')	
 # with open('Map'+TimeMap+'.pkl', 'rb') as f:

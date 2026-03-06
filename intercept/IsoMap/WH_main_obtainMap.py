@@ -77,7 +77,6 @@ def WH_main_obtainMapP(Map, draw=True, draw_interactive=False):
 
     timeIsoRes_ = np.diff(time)  # numpy 里 diff 是一维差分
     timeIsoRes = timeIsoRes_[0] if len(timeIsoRes_) > 0 else 0  # 第一个元素
-    Map["timePlot"] = timePlot
     Map["timeIsoRes"] = timeIsoRes
 
     for tt in range(numTime):

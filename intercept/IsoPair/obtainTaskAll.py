@@ -2,77 +2,126 @@ import numpy as np
 
 import numpy as np
 
-def obtainCost(flattened_pairs, pathidP):
+import numpy as np
+
+def obtainCost(flattened_pairs, pathidP, CapRef, Pid_ref_flat):
     """
+    计算代价函数：数值越小表示方案越优。
     计算代价函数：路径长度、空间距离、时间差距、朝向偏差以及安全距离的加权综合。
     
     参数:
     flattened_pairs: NumPy 矩阵，包含 [te, tp, ..., dist, Angle, distE2ValueF]
     pathidP: NumPy 矩阵，包含 [..., ..., path_len]
+    CapDist: 拦截距离阈值下界
+    CapDistTime: 拦截距离阈值上界
+    timeIsoRes: 时间等值间隔
+    v_P: 追捕者速度
+    Pid_ref_flat: 用于映射原始 Pid 到索引的数组
     
     返回:
     cost: 综合代价向量 (M,)
     costAll: 原始特征矩阵 (M, 3)
     """
+    # --- 0. 参数提取与广播 ---
+    CapDist = CapRef['CapDist']
+    CapDistTime_ = np.array(CapRef['CapDistTime'])
+    # 根据 Pid 索引映射对应的 CapDistTime
+    CapDistTime = CapDistTime_[Pid_ref_flat.astype(int)]
+
+    CapAngle = CapRef['CapAngle']/2
+    CapAngleTime_ = np.array(CapRef['CapAngleTime'])/2
+    CapAngleTime = CapAngleTime_[Pid_ref_flat.astype(int)]
+    
+    v_P = CapRef['v_P']
+    timeIsoRes = CapRef['timeIsoRes']
     
     # --- 1. 权重参数设置 ---
     param_L = 1.0    # 路径长度权重
-    param_d = 1.2    # 拦截点之间距离权重
-    param_t = 1.5    # 时间权重
-    param_v = 1.2    # 朝向权重
-    param_D = 2.0    # 打击安全权重
+    param_d = 1.5    # 拦截空间距离权重 (重要)
+    param_t = 1.5    # 时间匹配权重 (重要)
+    param_v = 1.0    # 朝向偏差权重
+    param_D = 2.0    # 目标安全距离权重 (关键：防止逃避者接近目标)
 
-    # --- 2. 特征提取 (0-based 索引转换) ---
-    # MATLAB: flattened_pairs(:,1) - flattened_pairs(:,2)
-    Delta_t = flattened_pairs[:, 0] - flattened_pairs[:, 1]
-    
-    # MATLAB: flattened_pairs(:,7) (拦截点距离)
-    Delta_d = flattened_pairs[:, 6]
-    
-    # MATLAB: pathidP(:,3) (路径长度)
-    Delta_L = pathidP[:, 2]
-    
-    # MATLAB: flattened_pairs(:,8) (偏离中心角度/朝向)
-    Delta_v = flattened_pairs[:, 7]
-    
-    # MATLAB: flattened_pairs(:,9) (距离目标的距离)
-    Delta_D = flattened_pairs[:, 8]
+    # --- 2. 特征提取 ---
+    Delta_t = flattened_pairs[:, 0] - flattened_pairs[:, 1]  # te - tp
+    Delta_d = flattened_pairs[:, 6]                         # 拦截点空间距离
+    Delta_L = pathidP[:, 2]                                 # 追捕者路径长度
+    Delta_v = flattened_pairs[:, 7]                         # 角度偏差
+    Delta_D = flattened_pairs[:, 8]                         # 拦截点距离目标的距离
 
-    # --- 3. 代价函数计算 (完全向量化) ---
-    
-    # 防止除以 0 的小常数
     eps = np.finfo(float).eps
+
+    # --- 3. 代价函数计算 (越小越优) ---
     
-    # 路径长度部分: 线性归一化
-    # 注意：如果 Delta_L 全部相同，max 为 0，需处理
+    # A. 路径长度代价: 越短越小
     max_L = np.max(Delta_L)
-    cost_L = param_L * Delta_L / (max_L + eps)
+    cost_L = Delta_L / (max_L + eps)
     
-    # 拦截点距离部分: Sigmoid 函数
-    # CapDist以内为1,CapDist~CapDistTime为0-1,CapDistTime随着时间变为CapDist
-    cost_d = param_d * 1.0 / (1.0 + np.exp(-0.1381 * (Delta_d - 50.0)))
+    # B. 拦截点距离代价: 
+    # Delta_d < CapDist 时为 0 (理想)
+    # CapDist ~ CapDistTime 之间从 0 线性增加到 1
+    # 大于 CapDistTime 为 1 (差)
+    cost_d = np.where(
+        Delta_d <= CapDist,
+        0.0,
+        np.where(
+            Delta_d <= CapDistTime,
+            (Delta_d - CapDist) / (CapDistTime - CapDist + eps),
+            1.0
+        )
+    )
     
-    # 朝向部分: 正弦映射
-    cost_v = param_v * np.sin(np.pi * np.abs(Delta_v) / (2.0 * 43.5))
+    # C. 朝向角度代价: 偏差越小 sin(0)=0 越小
+    # B. 朝向角度代价（分段线性）
+    # 0 ~ CapAngle: 0
+    # CapAngle ~ CapAngleTime: 0→1 线性
+    # CapAngleTime ~ 180: 1
+    abs_delta_v=np.abs(Delta_v)
+    cost_v = np.where(
+        abs_delta_v <= CapAngle,
+        0.0,
+        np.where(
+            abs_delta_v <= CapAngleTime,
+            (abs_delta_v - CapAngle) / (CapAngleTime - CapAngle + eps),
+            1.0
+        )
+    )
     
-    # 时间差距部分: 指数衰减 (时间差越大，代价越小)
-    cost_t = param_t * np.exp(-0.5365 * Delta_t)
+    # D. 时间匹配代价:
+    # Delta_t >= 0 (追捕者比逃避者早到或同时到) 代价为 0
+    # 稍微晚到 (-threshold ~ 0) 代价从 0 线性增加到 1
+    # 太晚 ( < -threshold) 代价为 1
+    time_threshold = (CapDistTime / v_P) / timeIsoRes
+    cost_t = np.where(
+        Delta_t >= 0,
+        0.0,
+        np.where(
+            Delta_t >= -time_threshold,
+            np.abs(Delta_t) / (time_threshold + eps), # 越晚(负值越大)代价越高
+            1.0
+        )
+    )
     
-    # 安全距离部分: Sigmoid 反向映射
-    cost_D = param_D * 1.0 / (1.0 + np.exp(0.022 * (Delta_D - 199.99)))
+    # E. 目标安全代价:
+    # Delta_D 越大（离目标越远拦截），exp(...)越大，分母越大，代价越小。
+    # 符合“越早拦截越好”的原则
+    cost_D = 1.0 / (1.0 + np.exp(0.022 * (Delta_D - 199.99)))
 
-    # 综合代价
-    cost = cost_L + cost_d + cost_v + cost_t + cost_D
+    # --- 4. 综合总代价 ---
+    cost = (param_L * cost_L + 
+            param_d * cost_d + 
+            param_v * cost_v + 
+            param_t * cost_t + 
+            param_D * cost_D)
 
-    # --- 4. 结果拼接 ---
-    # MATLAB: [Delta_t, Delta_d, Delta_D]
+    # 结果拼接
     costAll = np.column_stack((Delta_t, Delta_d, Delta_D))
 
     return cost, costAll
 
 import numpy as np
 
-def obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP_i_tt, IsoMapEin_i_tt):
+def obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP_i_tt, IsoMapEin_i_tt,CapRef):
     """
     代价函数计算与任务候选表生成
     
@@ -80,6 +129,7 @@ def obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP_i_tt, IsoMapEin_i_tt):
     IsoPairs_time_Eid_Pid_Posid: 包含 {te, tp, Eid, Pid, pairs_matrix, eid_ref, pid_ref} 的列表或对象数组
     IsoMapP_i_tt: 嵌套列表，存放 Pursuer 的 IsoMap 结构体
     IsoMapEin_i_tt: 嵌套列表，存放 Evader 的 IsoMap 结构体
+    CapRef: 包含拦截参数的字典
     """
     
     if len(IsoPairs_time_Eid_Pid_Posid) == 0:
@@ -130,7 +180,7 @@ def obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP_i_tt, IsoMapEin_i_tt):
     # --- 3. 构造代价函数 ---
     # 调用外部定义的 obtainCost 函数 (假设该函数已转换)
     # 传入 flattened_pairs 和 pathidP
-    cost, costAll = obtainCost(flattened_pairs, pathidP)
+    cost, costAll = obtainCost(flattened_pairs, pathidP, CapRef,pid_ref_flat)
 
     # --- 4. 拼接最终候选表 ---
     # 对应 MATLAB: [flattened_pairs(:,1:7), pathidP(:,3), cost, pathidE(:,2), pathidP(:,2), PEid, pathidE(:,3), pathidP(:,3), costAll]
@@ -162,7 +212,7 @@ def obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP_i_tt, IsoMapEin_i_tt):
 
 import numpy as np
 
-def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, IsoMap_i_tt_insertedE, ValuePos=None):
+def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, IsoMap_i_tt_insertedE, CapRef):
     """
     代价函数计算与任务候选表生成 (Time-Shift 版本)
     
@@ -218,9 +268,10 @@ def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, Is
         for t, eid, idxE in zip(te_flat, Eid_ref_flat, flattened_pairs[:, 4])
     ])
 
+    
     # --- 3. 构造代价函数 ---
     # 调用之前转换好的 obtainCost 函数
-    cost, costAll = obtainCost(flattened_pairs, pathidP)
+    cost, costAll = obtainCost(flattened_pairs, pathidP, CapRef,Pid_ref_flat)
 
     # --- 4. 拼接最终候选表 ---
     # MATLAB 拼接顺序：
@@ -235,7 +286,7 @@ def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, Is
     # 8: cost
     # 9: Eid对应的ValPosid (pathidE[:, 1])
     # 10: Pid对应的TPid (pathidP[:, 1])
-    # 11-12: Eid, Pid (原始ID)
+    # 11-12: Eid, Pid (原始ID)/[0 1]而不是[0 2]
     # 13: Eiso (pathidE[:, 2])
     # 14: Piso (pathidP[:, 2])
     # 15-17: costAll (如果是向量/矩阵，拼接全量)

@@ -46,8 +46,8 @@ if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
 output_video_name = os.path.join(output_dir, f'uav_interception_{current_time}.mp4')
-TimeMap='_0302_1940'
-TimeIso='_0302_2050'
+TimeMap='_0305_1800'
+TimeIso='_0305_1800'
 
 
 Map = joblib.load('Map'+TimeMap+'.jbl')	
@@ -68,7 +68,8 @@ pathFinalTP2Val = joblib.load('pathFinalTP2Val'+TimeMap+'.jbl')
 
 length_E_max=0
 for i in range(len(pathFinalE2ValIn)):
-    length_E_max=max(length_E_max,len(pathFinalE2ValIn[i][0][0]))
+    for j in range(len(pathFinalE2ValIn[i])):
+        length_E_max=max(length_E_max,len(pathFinalE2ValIn[i][j][0]))
 
 IsoMapETP2Iso_i_tt=joblib.load('IsoMapETP2Iso_i_tt'+TimeMap+'.jbl')
 IsoMapEIso2TP_i_tt=joblib.load('IsoMapEIso2TP_i_tt'+TimeMap+'.jbl')
@@ -115,7 +116,15 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment # 替代 matchpairs
 
 # --- 基础参数初始化 ---
-CapDist = 100
+CapDist = 200  # m
+CapRef={}
+CapRef['CapDist'] = CapDist
+CapRef['CapAngle'] = 87 #度
+CapRef['Stepsize'] = Stepsize
+CapRef['CapDistRef'] = 350 # camera_depth=350,
+CapRef['v_P'] = v_P
+CapRef['v_E'] = v_E
+CapRef['timeIsoRes'] = timeIsoRes
 PosE = Evader # 假设 Evader 已定义
 PosP = PStart_Point # 假设 PStart_Point 已定义
 
@@ -131,6 +140,8 @@ num_t1 = len(ETP2Val_IsoPos[0])
 num_p = len(PTP2TP_IsoPos)
 num_t2 = len(PTP2TP_IsoPos[0])
 
+CapRef['CapDistTime'] = np.array([CapDist] * num_e)
+CapRef['CapAngleTime'] = np.array([CapRef['CapAngle']] * num_e)
 # --- 2. 创建索引网格 (替代 ndgrid) ---
 # indexing='ij' 确保与 MATLAB ndgrid 的行为一致
 eid_idx, pid_idx, te_idx, tp_idx = np.meshgrid(
@@ -142,10 +153,10 @@ eid_idx, pid_idx, te_idx, tp_idx = np.meshgrid(
 # te 从 tp 开始，剔除 te < tp 的情况
 valid_idx = te_idx >= tp_idx
 
-pid_flat = pid_idx[valid_idx]
-eid_flat = eid_idx[valid_idx]
-tp_flat = tp_idx[valid_idx]
-te_flat = te_idx[valid_idx]
+pid_flat = pid_idx.ravel()
+eid_flat = eid_idx.ravel()
+tp_flat = tp_idx.ravel()
+te_flat = te_idx.ravel()
 
 # --- 4. 意图分析 ---
 Valid, threatMatrix = analyzeEvaderIntent(ValuePos, Evader)
@@ -159,7 +170,7 @@ results = [
         te, tp, eid, pid,
         obtainIsoPairs(
             ETP2Val_IsoPos[eid][te], PTP2TP_IsoPos[pid][tp], 
-            PosE[eid, :], PosP[pid, :], CapDist, ValuePos, 
+            [te,tp], CapRef, pid, ValuePos, 
             pairsE2Val, eid, ETP2Val_pathid[eid][te]
         ),
         eid, pid
@@ -180,7 +191,7 @@ IsoPairs_time_Eid_Pid_Posid = IsoPairs_time_Eid_Pid_Posid_[sort_idx]
 
 
 # --- 7. 任务获取与初步筛选 ---
-InterceptCandidates = obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP2TP_i_tt, IsoMapE2ValIn_i_tt)
+InterceptCandidates = obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP2TP_i_tt, IsoMapE2ValIn_i_tt,CapRef)
 IC = InterceptCandidates.copy()
 
 # 排序并取前 100 个用于绘图
@@ -268,7 +279,7 @@ distances = np.linalg.norm(
 PathPtrue = [p.reshape(-1, 1) for p in PosP]
 
 # 时间参数
-TimeRes = 0.01
+TimeRes = 1 # s真实时间
 t = 0
 t_all = 0
 
@@ -408,8 +419,8 @@ with writer.saving(fig, output_video_name, dpi=100):
             NearTPpos_E, NearTPid_E = obtainNearETP(Trans_Point[:, :2], PosE, ValuePos, pairsE2Val)
             
             
-            if not np.array_equal(NearTPid_E, EfromTPid) or not np.array_equal(Validnew, Valid):
-            # if True:
+            # if not np.array_equal(NearTPid_E, EfromTPid) or not np.array_equal(Validnew, Valid):
+            if True:
                 UnCapEid=UnCapEidNew
                 UnCapPid=UnCapPidNew
                 flagPlot=1
@@ -472,20 +483,55 @@ with writer.saving(fig, output_video_name, dpi=100):
 
                 # 筛选 te >= tp 的有效组合 (向量化掩码)
                 valid_mask = te_idx >= tp_idx
-                eid_flat = eid_idx[valid_mask]
-                pid_flat = pid_idx[valid_mask]
-                te_flat = te_idx[valid_mask] # 转为 1-based 供子函数使用
-                tp_flat = tp_idx[valid_mask]
-                idxE_flat=idxE[valid_mask]
-                idxP_flat=idxP[valid_mask]
+                eid_flat = eid_idx.ravel()
+                pid_flat = pid_idx.ravel()
+                te_flat = te_idx.ravel() # 转为 1-based 供子函数使用
+                tp_flat = tp_idx.ravel()
+                idxE_flat=idxE.ravel()
+                idxP_flat=idxP.ravel()
 
                 # --- 6. 执行拦截对搜索 (替代 arrayfun) ---
                 # 使用 zip 并行迭代，这是 Python 中替代多参数 arrayfun 的最高性能方案
+                # 定义参数
+                x1, y1 = CapDist, CapDist
+                x2, y2 = 2 * CapRef['CapDistRef'], CapRef['CapDistRef']
+
+                # 单行嵌套公式实现
+                CapDistTime = np.where(
+                    distances < x1,
+                    np.inf,  # 0 ~ CapDist 区间返回无穷大
+                    np.where(
+                        distances >= x2,
+                        y2,  # 2*CapRef ~ inf 区间返回 CapRef
+                        y1 + (distances - x1) * (y2 - y1) / (x2 - x1)  # 中间线性段 (CapDist ~ 2*CapRef)
+                    )
+                )
+
+                CapRef['CapDistTime']=CapDistTime
+
+                # 定义关键节点                
+                # 定义线性段的端点
+                x1, y1 = CapDist, CapRef['CapAngle']         # 起点 (CapDist, CapAngle)
+                x2, y2 = 2 * CapRef['CapDistRef'], 180        # 终点 (2*CapRef, 180)
+
+                # 单行嵌套公式实现
+                CapAngleTime = np.where(
+                    distances < x1,
+                    360,  # 0 ~ CapDist 区间返回 360 度（全向允许）
+                    np.where(
+                        distances >= x2,
+                        y2,   # 2*CapRef ~ inf 区间返回 180 度
+                        y1 + (distances - x1) * (y2 - y1) / (x2 - x1)  # 中间线性段 (CapAngle ~ 180)
+                    )
+                )
+                
+                CapRef['CapAngleTime']=CapAngleTime
+
                 results = [
                     [
                         te, tp, E2TP_TPIdx[ide], P2TP_TPIdx[idp],
                         obtainPTP2TP_IsoPos_timeShift2(
-                            idp, ide, tp, te, PosP, PosE, CapDist, 
+                            idp, ide, tp, te, CapRef, v_E, CapDistTime, 
                             IsoMap_i_tt_P2Iso, IsoMap_i_tt_E2Iso, ValuePos, pairsE2Val
                         ),
                         eid, pid,ide,idp
@@ -506,7 +552,7 @@ with writer.saving(fig, output_video_name, dpi=100):
 
                 # --- 8. 生成任务候选表 ---
                 InterceptCandidates = obtainTask_timeShift2(
-                    IsoPairs_time_ETPid_PTPid_Posid, IsoMap_i_tt_P2Iso, IsoMap_i_tt_E2Iso
+                    IsoPairs_time_ETPid_PTPid_Posid, IsoMap_i_tt_P2Iso, IsoMap_i_tt_E2Iso,CapRef
                 )
 
                 IC = InterceptCandidates.copy()
@@ -620,6 +666,7 @@ with writer.saving(fig, output_video_name, dpi=100):
         # --- 1. 清理与基础地图绘制 ---
     # --- 1. 清理与基础地图绘制 ---
         if t_all%10==0 or flagPlot==1:
+        # if True:
             ax.cla()
             
             Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, 
@@ -682,20 +729,22 @@ with writer.saving(fig, output_video_name, dpi=100):
                 # ax.plot(PathP[i][0, :], PathP[i][1, :], '--', color=color_p, linewidth=1, alpha=0.6)
                 # ax.plot(PathE[i][0, :], PathE[i][1, :], '--', color=color_e, linewidth=1, alpha=0.6)
                 
-                # --- 绘制真实历史轨迹 (加粗并稍微调淡灰色) ---
-                len_e_true = int(t_all * v_E)
-                ax.plot(PathE2Val_true[eid][:len_e_true, 0], PathE2Val_true[eid][:len_e_true, 1], 
-                        '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1)
-                
-                len_p_true = int(t_all * v_P)
-                ax.plot(PathPtrue[pid][0, :len_p_true], PathPtrue[pid][1, :len_p_true], 
-                        '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1)
+
 
                 # --- DWA 最优路径 (使用高亮的金黄色或对应颜色的实线) ---
                 ax.plot(BestPaths[idx][0, :], BestPaths[idx][1, :], '-', color=color_p, linewidth=2.5, zorder=3)
 
         # 设置图例避免遮挡
         # ax.legend(loc='upper right', fontsize='x-small', ncol=2)
+                        # --- 绘制真实历史轨迹 (加粗并稍微调淡灰色) ---
+            for iPlot in range(PathE2Val_true):
+                len_e_true = int(t_all * v_E)
+                ax.plot(PathE2Val_true[iPlot][:len_e_true, 0], PathE2Val_true[iPlot][:len_e_true, 1], 
+                        '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1)
+                
+                len_p_true = int(t_all * v_P)
+                ax.plot(PathPtrue[iPlot][0, :len_p_true], PathPtrue[iPlot][1, :len_p_true], 
+                        '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1)
         # --- 5. 刷新画布 ---
             ax.set_title(f"Simulation Time: {t_all:.2f}")
             plt.grid(True, linestyle='--', alpha=0.5)
