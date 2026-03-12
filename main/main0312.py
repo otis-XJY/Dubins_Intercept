@@ -561,15 +561,36 @@ with writer.saving(fig, output_video_name, dpi=100):
                 
                 # --- 任务指派 (完全向量化替代 accumarray/matchpairs) ---
 
-                # --- 1. 预筛选：每个 (Pid, Eid) 仅保留 cost 最小的一行 ---
-                # lexsort 按从后往前的主次键排序：Pid(12) -> Eid(11) -> cost(8)
-                # 这样排序后，相同的 (Pid, Eid) 对会排列在一起，且 cost 最小的排在最前面
-                best_idx = np.lexsort((IC[:, 8], IC[:, 11], IC[:, 12]))
-                IC_sorted = IC[best_idx]
-                
-                # 针对 (Pid, Eid) 进行去重，return_index=True 得到每个组合 cost 最小的行索引
-                _, unique_indices = np.unique(IC_sorted[:, [11, 12]], axis=0, return_index=True)
-                IC_candidates = IC_sorted[unique_indices]
+                # 1. 识别所有唯一的 (Pid_ref, Eid_ref) 组合
+                unique_pairs = np.unique(IC[:, [11, 12]], axis=0)
+                best_candidates_list = []
+
+                for pair in unique_pairs:
+                    eid_val, pid_val = pair
+                    # 提取当前 (Eid_ref, Pid_ref) 对的所有候选行
+                    mask = (IC[:, 11] == eid_val) & (IC[:, 12] == pid_val)
+                    group = IC[mask]
+                    
+                    # --- 第一层筛选：cost (索引8) 最小的前 50% ---
+                    # 按 cost 升序排序
+                    group = group[np.argsort(group[:, 8])]
+                    n1 = max(1, int(np.ceil(len(group) * 0.5)))
+                    group = group[:n1]
+                    
+                    # --- 第二层筛选：Delta_t (索引15) 最大的前 50% ---
+                    # 注意：costAll 开始于索引 15，所以 15 是 Delta_t
+                    # 按 Delta_t 降序排序
+                    group = group[np.argsort(group[:, 15])[::-1]]
+                    n2 = max(1, int(np.ceil(len(group) * 0.5)))
+                    group = group[:n2]
+                    
+                    # --- 第三层筛选：Delta_d (索引16) 最小的那一行 ---
+                    # 索引 16 是 Delta_d
+                    best_row_idx = np.argmin(group[:, 16])
+                    best_candidates_list.append(group[best_row_idx])
+
+                # 转换为 numpy 数组
+                IC_candidates = np.array(best_candidates_list)
 
                 # --- 2. 构建代价矩阵 ---
                 # 将原始 ID 映射为 0~N 的矩阵索引
@@ -796,7 +817,7 @@ for eid in range(num_E):
     PosEfinal=PathE2Val_true[eid][min(len_e_true-1, PathE2Val_true[eid].shape[0]-1), :]
 
     plt.plot(PathE2Val_true[eid][:len_e_true, 0], PathE2Val_true[eid][:len_e_true, 1], 
-            '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1)
+            '-', color='gray', linewidth=2.5, alpha=0.3, zorder=1) 
 
     plt.plot(PosEfinal[0], PosEfinal[1], 'd', color='black', markersize=8, markeredgecolor='w',alpha=1)
     plt.quiver(PosEfinal[0], PosEfinal[1], 150*np.cos(PosEfinal[2]), 150*np.sin(PosEfinal[2]), 
