@@ -10,6 +10,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
+import numpy as np
+from shapely.geometry import LineString, Polygon
 
 
 # 添加项目根目录到Python路径
@@ -125,6 +127,16 @@ CapRef['CapDistRef'] = 350 # camera_depth=350,
 CapRef['v_P'] = v_P
 CapRef['v_E'] = v_E
 CapRef['timeIsoRes'] = timeIsoRes
+
+
+obs_polygons = [
+    Polygon(np.asarray(poly, dtype=float)[:, :2])
+    for poly in (obs_no_circle)
+    if poly is not None
+]
+CapRef['obs_polygons'] = obs_polygons
+
+
 PosE = Evader # 假设 Evader 已定义
 PosP = PStart_Point # 假设 PStart_Point 已定义
 
@@ -404,7 +416,7 @@ with writer.saving(fig, output_video_name, dpi=100):
         # 调用 DWA 子函数
         min_dists, BestPaths = obtainDWAprePath(PosE, PathEpre, E_PreRef)
 
-        flagIn = 1 if np.all(min_dists <= CapDist) else 0
+        flagIn = 1 if np.all(min_dists <= 10) else 0
 
         # --- 5. 重新规划逻辑 ---
         if not flagIn:
@@ -558,7 +570,10 @@ with writer.saving(fig, output_video_name, dpi=100):
                 )
 
                 IC = InterceptCandidates.copy()
-                
+# plt.figure(figsize=(10, 8))
+# draw_candidates(IC_candidates, IsoMap_i_tt_P2Iso, IsoMap_i_tt_E2Iso, pathFinalE2ValIn, pathFinalP2TP)
+# Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in)
+# plt.show()
                 # --- 任务指派 (完全向量化替代 accumarray/matchpairs) ---
 
                 # 1. 识别所有唯一的 (Pid_ref, Eid_ref) 组合
@@ -586,7 +601,7 @@ with writer.saving(fig, output_video_name, dpi=100):
                     
                     # --- 第三层筛选：Delta_d (索引16) 最小的那一行 ---
                     # 索引 16 是 Delta_d
-                    best_row_idx = np.argmin(group[:, 16])
+                    best_row_idx = np.argmax(group[:, 16])
                     best_candidates_list.append(group[best_row_idx])
 
                 # 转换为 numpy 数组

@@ -1,4 +1,116 @@
 import numpy as np
+from shapely.geometry import LineString, Polygon
+
+
+def plot_obs_polygons(obs_polygons, ax=None, show_idx=True, color='tab:blue', alpha=0.35):
+    """绘制障碍物多边形，支持 Shapely Polygon 或原始顶点数组。"""
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon as MplPolygon
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(8, 6))
+
+    if obs_polygons is None:
+        print('[plot_obs_polygons] obs_polygons is None')
+        return ax
+
+    plotted = 0
+    all_coords = []
+
+    for i, poly in enumerate(obs_polygons):
+        if poly is None:
+            continue
+
+        # 兼容两种输入：Shapely Polygon / 顶点数组 (Nx2 或 2xN)
+        if hasattr(poly, 'exterior'):
+            if poly.is_empty:
+                continue
+            coords = np.asarray(poly.exterior.coords)
+            cx, cy = poly.centroid.x, poly.centroid.y
+        else:
+            arr = np.asarray(poly, dtype=float)
+            if arr.ndim != 2:
+                continue
+            coords = arr[:, :2] if arr.shape[1] >= 2 else arr.T[:, :2]
+            if coords.shape[0] < 3:
+                continue
+            cx, cy = np.mean(coords[:, 0]), np.mean(coords[:, 1])
+
+        patch = MplPolygon(coords, closed=True, facecolor=color, edgecolor='k', alpha=alpha, linewidth=1.5)
+        ax.add_patch(patch)
+        all_coords.append(coords)
+        plotted += 1
+
+        if show_idx:
+            ax.text(cx, cy, str(i), fontsize=10, color='k', ha='center', va='center')
+
+    if plotted > 0:
+        pts = np.vstack(all_coords)
+        xmin, ymin = np.min(pts, axis=0)
+        xmax, ymax = np.max(pts, axis=0)
+        pad_x = max(1.0, 0.05 * (xmax - xmin + 1e-9))
+        pad_y = max(1.0, 0.05 * (ymax - ymin + 1e-9))
+        ax.set_xlim(xmin - pad_x, xmax + pad_x)
+        ax.set_ylim(ymin - pad_y, ymax + pad_y)
+
+    print(f'[plot_obs_polygons] plotted {plotted} polygons')
+
+    ax.set_aspect('equal', adjustable='box')
+    ax.grid(True, linestyle='--', alpha=0.4)
+    ax.set_title('obs_polygons')
+    return ax
+
+
+def debug_plot_intercept_pairs(Epos, Ppos, obs_polygons, pair_indices=None, ax=None, max_pairs=None, show_plot=True):
+    """绘制 E-P 连线与障碍物，并输出每对连线相交的障碍物编号。"""
+    import matplotlib.pyplot as plt
+
+    if obs_polygons is None:
+        obs_polygons = []
+
+    if pair_indices is None:
+        pair_indices = [(i, j) for i in range(Epos.shape[0]) for j in range(Ppos.shape[0])]
+
+    if max_pairs is not None:
+        pair_indices = pair_indices[:max_pairs]
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=(10, 8))
+
+    plot_obs_polygons(obs_polygons, ax=ax, show_idx=True, color='tab:blue', alpha=0.25)
+
+    report = []
+    for k, (ie, ip) in enumerate(pair_indices):
+        p_e = Epos[ie]
+        p_p = Ppos[ip]
+        seg = LineString([tuple(p_e), tuple(p_p)])
+
+        hit_ids = [oid for oid, poly in enumerate(obs_polygons) if seg.intersects(poly)]
+        feasible = len(hit_ids) == 0
+
+        report.append({
+            'pair_id': k,
+            'E_idx': int(ie),
+            'P_idx': int(ip),
+            'intersections': hit_ids,
+            'feasible': feasible,
+        })
+
+        color = 'tab:green' if feasible else 'tab:red'
+        ax.plot([p_e[0], p_p[0]], [p_e[1], p_p[1]], '-', color=color, linewidth=1.6, alpha=0.85)
+        ax.plot(p_e[0], p_e[1], 'o', color='tab:orange', markersize=5)
+        ax.plot(p_p[0], p_p[1], '^', color='tab:purple', markersize=5)
+
+        print(f"[debug_pair] pair={k} E={ie} P={ip} feasible={feasible} intersect_obs={hit_ids}")
+
+    ax.set_title('Intercept Pair LOS Debug')
+    ax.set_aspect('equal', adjustable='box')
+    ax.grid(True, linestyle='--', alpha=0.4)
+
+    if show_plot:
+        plt.show()
+
+    return report
 
 def obtainIsoPairs(IsoEpos, IsoPpos, tall, CapRef, pid, ValuePos, pairs, Eid, ETP2Val_IsoPosId):
     """
@@ -67,6 +179,36 @@ def obtainIsoPairs(IsoEpos, IsoPpos, tall, CapRef, pid, ValuePos, pairs, Eid, ET
     )
 
     validMask = validAngleMask & timeMask & (dist <= CapDistTime)
+
+    # --- Step 3.5 视线约束：Epos 与 Ppos 连线不穿越障碍物 ---
+    obs_polygons = CapRef.get('obs_polygons')
+
+    has_obstacles = obs_polygons is not None and len(obs_polygons) > 0
+    if has_obstacles and np.any(validMask):
+        cand_e, cand_p = np.where(validMask)
+
+        if CapRef.get('debug_plot_pairs', False):
+            CapRef['_last_debug_report'] = debug_plot_intercept_pairs(
+                Epos,
+                Ppos,
+                obs_polygons,
+                pair_indices=list(zip(cand_e.tolist(), cand_p.tolist())),
+                max_pairs=CapRef.get('debug_max_pairs', None),
+                show_plot=CapRef.get('debug_show_plot', True),
+            )
+
+        los_valid = np.array([
+            all(
+                not LineString([tuple(Epos[ie]), tuple(Ppos[ip])]).intersects(poly)
+                for poly in obs_polygons
+            )
+            for ie, ip in zip(cand_e, cand_p)
+        ], dtype=bool)
+
+        los_mask = np.zeros_like(validMask, dtype=bool)
+        if np.any(los_valid):
+            los_mask[cand_e[los_valid], cand_p[los_valid]] = True
+        validMask = validMask & los_mask
 
 
 

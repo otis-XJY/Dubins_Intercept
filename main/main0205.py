@@ -226,10 +226,10 @@ final_results_mask = np.array([
 AssignedIntercepts = best_IC_per_EP[final_results_mask]
 ICFinal = AssignedIntercepts
 # # --- 绘图部分 2 (ICFinal 最终分配结果) ---
-# plt.figure(figsize=(10, 8))
-# draw_candidates(ICFinal, IsoMapP2TP_i_tt, IsoMapE2ValIn_i_tt, pathFinalE2ValIn, pathFinalP2TP)
-# Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in)
-# plt.show()
+plt.figure(figsize=(10, 8))
+draw_candidates(InterceptCandidates, IsoMapP2TP_i_tt, IsoMapE2ValIn_i_tt, pathFinalE2ValIn, pathFinalP2TP)
+Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in)
+plt.show()
 # --- 10. 拼接结果 pairs_CostE2P ---
 # 提取 AssignedIntercepts 的第 16 到 18 列 (Python 索引 15:18)
 # 并与 pairs_realE2P 拼接
