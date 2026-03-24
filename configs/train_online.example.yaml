@@ -1,0 +1,31 @@
+episodes: 300
+max_episode_steps: 200
+gamma: 0.99
+value_coef: 0.5
+entropy_coef: 0.01
+lr: 0.0003
+hidden_dim: 128
+num_heads: 4
+seed: 42
+device: cpu
+schemes:
+  - Concatenative Query Network
+  - Gated Query Network
+  - Point-Wise Scoring Network
+time_res: 1.0
+k_max: 32
+step_mode: decision
+max_inner_ticks: 50
+allow_dummy_if_missing: true
+enable_dwa_replan: true
+wandb_project: dubins-marl-online
+wandb_entity: null
+wandb_run_name: online_multi_scheme
+wandb_mode: online
+log_interval: 1
+eval_interval: 10
+eval_episodes: 1
+save_dir: output/checkpoints
+save_best: true
+save_replay: false
+replay_dir: output/eval_traces

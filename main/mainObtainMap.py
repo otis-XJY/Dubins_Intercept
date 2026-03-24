@@ -7,7 +7,8 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 import matplotlib
-matplotlib.use('TkAgg')  # 强制使用TkAgg后端
+matplotlib.use('Agg')  # 必须在导入 pyplot 之前设置
+import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib.pyplot as plt
 from intercept.Map.obtainMap import obtainMap
@@ -17,7 +18,9 @@ import gc
 # 统一保存函数
 def fast_save(obj, name_, TimeIso_):
     # 使用 .jbl 后缀区分普通 pickle
-    filename = f"{name_}{TimeIso_}.jbl"
+    save_dir = f"./map/{TimeIso_}"
+    os.makedirs(save_dir, exist_ok=True)
+    filename = f"{save_dir}/{name_}.jbl"
     print(f"正在压缩保存 {filename} ...")
     joblib.dump(obj, filename, compress=3) 
 
@@ -44,7 +47,7 @@ Map['mapsize_y'] = 1000 * 2
 
 # 障碍物参数
 Map['R'] = [100, 120]  # 障碍物半径范围
-Map['num_obs_nocircle'] = 10  # 多边形随机障碍物数量
+Map['num_obs_nocircle'] = 3  # 多边形随机障碍物数量
 Map['num_steps'] = 100  # 边界上几个点
 
 # 设施点位置
@@ -85,8 +88,10 @@ Map['Trans_Point'] = Trans_Point
 
 # 调用 obtainMap 函数
 Map = obtainMap(Map, n_topo=15, n_blank=15, safety=20.0)
-TimeMap='_0305_1800'
-SaveName = 'Map'+TimeMap
+TimeMap='0320_0920'
+save_dir = './map/' + TimeMap
+os.makedirs(save_dir, exist_ok=True)
+SaveName = save_dir + '/Map'
 
 fast_save(Map, 'Map',TimeMap)
 

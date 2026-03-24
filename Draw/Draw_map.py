@@ -1,6 +1,7 @@
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # 必须在导入 pyplot 之前设置
 import matplotlib.pyplot as plt
-
 
 def Draw_map(startpoint, endpoint, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in, ax=None):
     """

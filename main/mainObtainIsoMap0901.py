@@ -7,7 +7,9 @@ import gc
 # 统一保存函数
 def fast_save(obj, name_, TimeIso_):
     # 使用 .jbl 后缀区分普通 pickle
-    filename = f"{name_}{TimeIso_}.jbl"
+    save_dir = f"./map/{TimeIso_}"
+    os.makedirs(save_dir, exist_ok=True)
+    filename = f"{save_dir}/{name_}.jbl"
     print(f"正在压缩保存 {filename} ...")
     joblib.dump(obj, filename, compress=3) 
 
@@ -25,10 +27,9 @@ from intercept.IsoMap.WH_main_obtainMap import WH_main_obtainMapP,WH_main_obtain
 # parser = argparse.ArgumentParser()
 # parser.add_argument('--nodraw', action='store_true', help='如果指定则不进行绘图，直接返回结果')
 # args = parser.parse_args()
-TimeMap='_0305_1800'
-TimeIso='_0305_1800'
+TimeMap='0320_0920'
 
-Map = joblib.load('Map'+TimeMap+'.jbl')	
+Map = joblib.load('./map/' + TimeMap + '/Map.jbl')	
 
 # 设置 UAV 和时间相关参数
 Map['v_E'] = 20  # m/s

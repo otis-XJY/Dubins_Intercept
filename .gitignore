@@ -25,3 +25,5 @@ data/
 output/
 temp/
 AI/
+map/
+wandb/

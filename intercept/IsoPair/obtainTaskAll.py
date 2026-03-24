@@ -115,7 +115,7 @@ def obtainCost(flattened_pairs, pathidP, CapRef, Pid_ref_flat):
             param_D * cost_D)
 
     # 结果拼接
-    costAll = np.column_stack((Delta_t, Delta_d, Delta_D))
+    costAll = np.column_stack((Delta_t, Delta_d, Delta_v, Delta_L,Delta_D ))
 
     return cost, costAll
 
