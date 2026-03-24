@@ -37,7 +37,7 @@ reward:
   terminal_capture_bonus: 100.0
   terminal_asset_loss_penalty: 500.0
   asset_breach_radius: 40.0
-  dist_progress_scale: 0.0
+  dist_progress_scale: 0.05
 wandb_project: dubins-marl-online
 wandb_entity: null
 wandb_run_name: online_multi_scheme

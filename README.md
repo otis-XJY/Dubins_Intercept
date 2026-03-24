@@ -22,15 +22,18 @@
 : 强化学习环境，包含真实 IsoMap 重规划与 dummy 回退模式。
 
 2. [marl/obs_generator.py](marl/obs_generator.py)
-: 观测构建器，生成 V_P / V_E / V_C 及 mask。
+: 观测构建器，直接生成模型输入对齐字段（self_uav / self_pts / enemies / masks）。
 
-3. [marl/models.py](marl/models.py)
+3. [marl/rewards.py](marl/rewards.py)
+: 独立奖励模块，支持配置化与运行时调参。
+
+4. [marl/models.py](marl/models.py)
 : 三种策略网络结构（A/B/C）与统一命名、构建接口。
 
-4. [marl/train_online.py](marl/train_online.py)
-: 在线训练入口，支持多方案并训、W&B、配置文件、评估与 best 保存。
+5. [marl/train_online.py](marl/train_online.py)
+: 在线训练入口，支持单机、DataParallel、多进程 DDP（torchrun）、W&B、配置文件、评估与 best 保存。
 
-5. [configs/train_online.example.yaml](configs/train_online.example.yaml)
+6. [configs/train_online.example.yaml](configs/train_online.example.yaml)
 : 训练配置样例。
 
 ---
@@ -100,49 +103,48 @@
 
 ---
 
-## 4. 观测空间设计（Phase-2）
+## 4. 观测空间设计（模型直连）
 
-观测由 [marl/obs_generator.py](marl/obs_generator.py) 生成，兼容两套字段名：
+观测由 [marl/obs_generator.py](marl/obs_generator.py) 生成，并直接对齐 [marl/models.py](marl/models.py) 的输入键。
 
-1. Phase-2 字段
-: `V_P`, `V_E`, `V_C`, `V_C_mask`。
+当前统一字段：
 
-2. 环境通用字段
-: `pursuers`, `evaders`, `candidates`, `candidate_mask`。
+1. `self_uav`: `[P, 1, 3]`
+2. `ally_uavs`: `[P, max(1, P-1), 3]`
+3. `self_pts`: `[P, K_t, 8]`（`K_t` 为当前时刻动态候选数）
+4. `ally_pts`: `[P, max(1, (P-1)*K_t), 8]`
+5. `enemies`: `[P, E, 3]`
+6. `targets`: `[P, E, 2]`
+7. `ally_mask`, `self_pts_mask`, `ally_pts_mask`, `enemy_mask`, `target_mask`
 
-### 4.1 Pursuer 节点 V_P（每个 P 6 维）
+### 4.1 self_uav / ally_uavs / enemies
 
-特征：
+特征语义统一为几何状态 `(x, y, theta)`，并在观测维度上按自机、友机、敌机分组。
 
-1. x, y
-2. v_x, v_y
-3. cos(theta), sin(theta)
+### 4.2 self_pts / ally_pts
 
-### 4.2 Evader 节点 V_E（每个 E 8 维）
-
-特征：
-
-1. x, y
-2. v_x, v_y
-3. cos(theta), sin(theta)
-4. inferred_target_x, inferred_target_y
-
-### 4.3 Candidate 节点 V_C（每个候选 6 维）
-
-特征：
+候选点特征以 `self_pts[..., :6]` 为核心：
 
 1. candidate_x, candidate_y
 2. t_p, t_e
 3. delta_t = t_e - t_p
 4. cost
 
-并使用 `V_C_mask` 指示有效候选，支持 padding 到固定 `k_max`。
+`self_pts` 的后 2 维是保留扩展位，便于后续加入风险、可见性等几何特征。
+
+### 4.3 masks
+
+所有不定长实体都使用布尔 mask 指示有效位，当前主要依赖：
+
+1. `self_pts_mask`
+2. `ally_pts_mask`
+3. `ally_mask`, `enemy_mask`, `target_mask`
 
 ---
 
 ## 5. 动作空间与动作语义
 
-动作空间定义为 `MultiDiscrete([k_max] * num_P)`，即每个 pursuer 选择一个候选索引。
+动作语义是“每个 pursuer 选择一个候选索引”，候选长度随当前时刻动态变化。
 
 环境内部会统一归一化为 one-hot 权重（`_normalize_action`），并处理：
 
@@ -156,22 +158,34 @@
 
 ## 6. 奖励函数设计
 
-定义在 [marl/MARL_env.py](marl/MARL_env.py) 的 `_compute_rewards` 及 step 捕获奖励逻辑。
+奖励已独立到 [marl/rewards.py](marl/rewards.py)，环境只负责调用。
+
+主要接口：
+
+1. `TODCRewardFunction.compute_step_rewards`
+2. `TODCRewardFunction.apply_capture_bonus`
+3. `TODCMARLEnv.set_reward_params`
+
+你可以通过三种方式改奖励：
+
+1. 配置文件中的 `reward` 字段
+2. 训练参数 `--reward-json '{...}'`
+3. 运行时 `env.set_reward_params(...)` 或 `env.reset(options={"reward": {...}})`
 
 总奖励由三部分构成：
 
 1. 距离改善奖励
 : 使用最小 P-E 距离改善量
-: `r_dist = dist_reward_scale * (last_min_dist - curr_min_dist)`
+: `r_dist = dist_progress_scale * (last_min_dist - curr_min_dist)`
 
 2. 熵奖励（带可行性门控）
 : 对动作分布熵进行鼓励，提升探索
 : 仅当 top-k 候选的 `delta_t` 可行时激活
-: 系数为 `entropy_lambda`
+: 系数为 `entropy_scale`
 
 3. 捕获奖励
 : 每当有新 Evader 被捕获，给所有 pursuer 共享增益
-: `+100 * captured_new / num_E`
+: `capture_bonus * captured_new / num_E`
 
 终止相关惩罚目前以“结束条件触发”为主，显式负奖励较少，可按需求扩展。
 
@@ -296,6 +310,22 @@
 3. last checkpoint（`*_last.pt`）
 4. 评估轨迹回放数据（npz）
 
+### 9.5 多 GPU 并行
+
+当前支持两种多卡方式：
+
+1. DataParallel（单进程多卡）
+: 适合快速试验，参数：`--multi-gpu true --gpu-ids 0,1,2,3`
+
+2. DDP（torchrun，多进程多卡）
+: 推荐正式训练，参数：`--distributed true --ddp-backend nccl`
+
+DDP 下注意：
+
+1. 每张卡一个进程，由 torchrun 注入 `RANK/WORLD_SIZE/LOCAL_RANK`。
+2. 主进程（rank0）负责 W&B、评估与 checkpoint 保存。
+3. 与 `multi_gpu` 互斥，DDP 启用时会忽略 DataParallel 参数。
+
 ---
 
 ## 10. W&B 可视化
@@ -344,6 +374,22 @@
 
 1. `python -m marl.train_online --config configs/train_online.example.yaml --episodes 500 --wandb-mode online`
 
+单机多卡 DataParallel 示例：
+
+1. `python -m marl.train_online --config configs/train_online.example.yaml --device cuda:0 --multi-gpu true --gpu-ids 0,1,2,3`
+
+DDP（torchrun）4 卡示例：
+
+1. `torchrun --standalone --nproc_per_node=4 -m marl.train_online --config configs/train_online.example.yaml --distributed true --ddp-backend nccl`
+
+DDP（torchrun）8 卡示例：
+
+1. `torchrun --standalone --nproc_per_node=8 -m marl.train_online --config configs/train_online.example.yaml --distributed true --ddp-backend nccl`
+
+DDP 同时覆盖奖励参数示例：
+
+1. `torchrun --standalone --nproc_per_node=8 -m marl.train_online --config configs/train_online.example.yaml --distributed true --reward-json '{"dist_progress_scale":0.08,"entropy_scale":0.05,"capture_bonus":120}'`
+
 ---
 
 ## 12. 后续可针对性修改建议
@@ -358,7 +404,7 @@
 
 ### 12.2 改奖励函数
 
-优先改 [marl/MARL_env.py](marl/MARL_env.py) 的 `_compute_rewards`：
+优先改 [marl/rewards.py](marl/rewards.py)：
 
 1. 增加碰撞显式负奖励。
 2. 增加时间惩罚（更快拦截）。
@@ -379,6 +425,7 @@
 1. 从单步 A2C 升级到 n-step GAE。
 2. 增加 PPO clip 目标与 minibatch。
 3. 引入 replay buffer + off-policy（如 SAC 离散变体）。
+4. 从 DataParallel 迁移到多机 DDP（torchrun + rendezvous）。
 
 ### 12.5 改观测与动作
 
@@ -393,7 +440,7 @@
 ## 13. 已知限制
 
 1. 当前训练器是轻量在线更新实现，尚非完整 PPO 工程版。
-2. `_build_model_obs` 中部分特征是从环境字段映射而来，仍有进一步精细化空间。
+2. 当前 DDP 主要覆盖单机多卡，暂未内置多机 rendezvous 参数模板。
 3. real_mode 的重规划依赖 map 资产完整性，资产缺失时会退到 dummy。
 
 ---

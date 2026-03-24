@@ -28,6 +28,7 @@ from intercept.IsoPair.obtainTaskAll import obtainTask_timeShift2
 from intercept.Prediction.obtainDWAprePath import obtainDWAprePath
 from intercept.Prediction.predictLikelyTarget import predictLikelyTargetNew
 from marl.obs_generator import TODCObservationGenerator
+from marl.rewards import TODCRewardFunction
 
 
 @dataclass
@@ -51,20 +52,21 @@ class TODCMARLEnv(gym.Env):
         self.evader_profile_mode = self.config.get("evader_profile_mode", "random")
         self.evader_profile_id = self.config.get("evader_profile_id", None)
         self.time_res = float(self.config.get("time_res", 1.0))
-        self.k_max = int(self.config.get("k_max", 32))
+        # Dynamic candidate length: k_max is inferred from current candidates per step.
+        self.k_max = 1
         self.render_mode = self.config.get("render_mode", "none")
         self.allow_dummy_if_missing = bool(self.config.get("allow_dummy_if_missing", True))
         self.enable_dwa_replan = bool(self.config.get("enable_dwa_replan", True))
         # step_mode="decision" makes one RL step align with one online decision event (replan).
         self.step_mode = str(self.config.get("step_mode", "decision")).lower()
-        self.max_inner_ticks = int(self.config.get("max_inner_ticks", 200))
+        self.max_inner_ticks = self._normalize_max_inner_ticks(self.config.get("max_inner_ticks", 200))
         self.max_episode_steps = int(self.config.get("max_episode_steps", 600))
-        self.entropy_lambda = float(self.config.get("entropy_lambda", 0.1))
-        self.dist_reward_scale = float(self.config.get("dist_reward_scale", 0.05))
         self.collision_dist = float(self.config.get("collision_dist", 25.0))
+        self.reward_fn = TODCRewardFunction.from_env_config(self.config)
 
         self._load_assets()
-        self.obs_generator = TODCObservationGenerator(k_max=self.k_max)
+        self.num_V = int(self.ValuePos.shape[0]) if hasattr(self, "ValuePos") else 0
+        self.obs_generator = TODCObservationGenerator()
         self._build_spaces()
 
         self.fig = None
@@ -80,20 +82,60 @@ class TODCMARLEnv(gym.Env):
         self.current_profile = None
         self.decision_step = 0
 
+    @staticmethod
+    def _normalize_max_inner_ticks(value) -> int:
+        ticks = int(value)
+        return max(1, ticks)
+
+    def set_runtime_params(
+        self,
+        *,
+        step_mode: Optional[str] = None,
+        max_inner_ticks: Optional[int] = None,
+    ):
+        """Update online decision-step runtime parameters safely."""
+        if step_mode is not None:
+            mode = str(step_mode).lower()
+            if mode not in {"decision", "time"}:
+                raise ValueError(f"Unsupported step_mode={step_mode}. Use 'decision' or 'time'.")
+            self.step_mode = mode
+
+        if max_inner_ticks is not None:
+            self.max_inner_ticks = self._normalize_max_inner_ticks(max_inner_ticks)
+
+    def set_reward_params(self, **kwargs):
+        """Runtime reward tuning without touching environment dynamics."""
+        self.reward_fn.update_config(**kwargs)
+
     def _build_spaces(self):
+        ally_slots = max(1, self.num_P - 1)
+        ally_pts_slots = max(1, (self.num_P - 1) * self.k_max)
+        asset_slots = max(1, self.num_V)
         self.action_space = spaces.MultiDiscrete(np.full((self.num_P,), self.k_max, dtype=np.int64))
         self.observation_space = spaces.Dict(
             {
-                "pursuers": spaces.Box(-np.inf, np.inf, shape=(self.num_P, 6), dtype=np.float32),
-                "evaders": spaces.Box(-np.inf, np.inf, shape=(self.num_E, 8), dtype=np.float32),
-                "candidates": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.k_max, 6), dtype=np.float32),
-                "candidate_mask": spaces.Box(0.0, 1.0, shape=(self.num_P, self.k_max), dtype=np.float32),
-                "V_P": spaces.Box(-np.inf, np.inf, shape=(self.num_P, 6), dtype=np.float32),
-                "V_E": spaces.Box(-np.inf, np.inf, shape=(self.num_E, 8), dtype=np.float32),
-                "V_C": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.k_max, 6), dtype=np.float32),
-                "V_C_mask": spaces.Box(0.0, 1.0, shape=(self.num_P, self.k_max), dtype=np.float32),
+                "self_uav": spaces.Box(-np.inf, np.inf, shape=(self.num_P, 1, 3), dtype=np.float32),
+                "ally_uavs": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_slots, 3), dtype=np.float32),
+                "self_pts": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.k_max, 8), dtype=np.float32),
+                "ally_pts": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_pts_slots, 8), dtype=np.float32),
+                "enemies": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.num_E, 3), dtype=np.float32),
+                "targets": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.num_E, 2), dtype=np.float32),
+                "assets": spaces.Box(-np.inf, np.inf, shape=(self.num_P, asset_slots, 2), dtype=np.float32),
+                "ally_mask": spaces.Box(0, 1, shape=(self.num_P, ally_slots), dtype=np.int8),
+                "self_pts_mask": spaces.Box(0, 1, shape=(self.num_P, self.k_max), dtype=np.int8),
+                "ally_pts_mask": spaces.Box(0, 1, shape=(self.num_P, ally_pts_slots), dtype=np.int8),
+                "enemy_mask": spaces.Box(0, 1, shape=(self.num_P, self.num_E), dtype=np.int8),
+                "target_mask": spaces.Box(0, 1, shape=(self.num_P, self.num_E), dtype=np.int8),
+                "asset_mask": spaces.Box(0, 1, shape=(self.num_P, asset_slots), dtype=np.int8),
             }
         )
+
+    def _sync_dynamic_k(self, obs: Dict[str, np.ndarray]):
+        k_new = int(obs["self_pts"].shape[1])
+        if k_new != self.k_max:
+            self.k_max = max(1, k_new)
+            self._build_spaces()
+            self.last_action_weights = np.zeros((self.num_P, self.k_max), dtype=np.float32)
 
     @staticmethod
     def _normalize_time_folder(tag: Optional[str]) -> Optional[str]:
@@ -332,6 +374,19 @@ class TODCMARLEnv(gym.Env):
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None):
         super().reset(seed=seed)
+        options = options or {}
+
+        # Support per-episode runtime override for online control knobs.
+        if ("step_mode" in options) or ("max_inner_ticks" in options):
+            self.set_runtime_params(
+                step_mode=options.get("step_mode"),
+                max_inner_ticks=options.get("max_inner_ticks"),
+            )
+
+        reward_opts = options.get("reward")
+        if isinstance(reward_opts, dict) and len(reward_opts) > 0:
+            self.set_reward_params(**reward_opts)
+
         if self.real_mode:
             profile_dir = self._select_profile_dir(options)
             self._load_evader_profile(profile_dir)
@@ -371,12 +426,22 @@ class TODCMARLEnv(gym.Env):
 
         self.last_min_dist = self._pairwise_dist().min(axis=1)
         obs = self._build_obs()
+        self._sync_dynamic_k(obs)
         info = {
             "real_mode": self.real_mode,
             "replanned": bool(self.real_mode),
             "num_candidates": int(self.IC_candidates.shape[0]),
             "time_map": self.time_map,
             "profile": self.current_profile,
+            "step_mode": self.step_mode,
+            "max_inner_ticks": int(self.max_inner_ticks),
+            "reward": {
+                "dist_progress_scale": float(self.reward_fn.config.dist_progress_scale),
+                "w_global": float(self.reward_fn.config.w_global),
+                "step_cost": float(self.reward_fn.config.step_cost),
+                "terminal_capture_bonus": float(self.reward_fn.config.terminal_capture_bonus),
+                "terminal_asset_loss_penalty": float(self.reward_fn.config.terminal_asset_loss_penalty),
+            },
         }
         return obs, info
 
@@ -464,15 +529,19 @@ class TODCMARLEnv(gym.Env):
             self.episode_step += 1
 
         rewards = self._compute_rewards(actions)
+        asset_breached = self._check_asset_breach()
+        self.reward_fn.apply_terminal_rewards(
+            rewards,
+            captured_delta=stats.captured,
+            num_e=self.num_E,
+            asset_breached=asset_breached,
+        )
 
-        if stats.captured > 0:
-            for i in range(self.num_P):
-                rewards[f"p_{i}"] += 100.0 * stats.captured / max(1, self.num_E)
-
-        done_all = bool(np.all(self.Capflag) or stats.collision)
+        done_all = bool(np.all(self.Capflag) or stats.collision or asset_breached)
         truncated_all = bool(self.episode_step >= self.max_episode_steps)
 
         obs = self._build_obs()
+        self._sync_dynamic_k(obs)
         terminations = {f"p_{i}": done_all for i in range(self.num_P)}
         truncations = {f"p_{i}": truncated_all for i in range(self.num_P)}
         terminations["__all__"] = done_all
@@ -483,11 +552,13 @@ class TODCMARLEnv(gym.Env):
                 "replanned": stats.replanned,
                 "collision": stats.collision,
                 "captured_total": int(np.sum(self.Capflag)),
+                "asset_breached": bool(asset_breached),
                 "num_candidates": int(self.IC_candidates.shape[0]),
                 "inner_ticks": int(stats.inner_ticks),
                 "forced_decision": bool(stats.forced_decision),
                 "decision_step": int(self.decision_step),
                 "step_mode": self.step_mode,
+                "max_inner_ticks": int(self.max_inner_ticks),
             }
             for i in range(self.num_P)
         }
@@ -519,8 +590,8 @@ class TODCMARLEnv(gym.Env):
     def _advance_dummy(self, actions: np.ndarray):
         targets = np.zeros((self.num_P, 2), dtype=float)
         obs_now = self._build_obs()
-        cand_nodes = obs_now["V_C"]
-        cand_mask = obs_now["V_C_mask"]
+        cand_nodes = obs_now["self_pts"][:, :, :6]
+        cand_mask = np.asarray(obs_now["self_pts_mask"], dtype=np.float32)
         for pid in range(self.num_P):
             c_feat, c_mask = cand_nodes[pid], cand_mask[pid]
             valid = c_mask > 0
@@ -814,7 +885,9 @@ class TODCMARLEnv(gym.Env):
 
     def _normalize_action(self, action_dict) -> np.ndarray:
         obs = self._build_obs()
-        mask = obs["candidate_mask"]
+        self._sync_dynamic_k(obs)
+        mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
+        k_curr = int(mask.shape[1])
 
         # Internally use one-hot action weights, but accept index actions by default.
         idx = np.zeros((self.num_P,), dtype=np.int64)
@@ -827,7 +900,7 @@ class TODCMARLEnv(gym.Env):
                 a = np.asarray(action_dict[key]).reshape(-1)
                 if a.size == 0:
                     continue
-                if a.size == self.k_max:
+                if a.size == k_curr:
                     w = np.asarray(a, dtype=np.float32) * mask[i]
                     idx[i] = int(np.argmax(w)) if np.any(mask[i] > 0) else 0
                 else:
@@ -839,56 +912,40 @@ class TODCMARLEnv(gym.Env):
             elif arr.ndim == 1:
                 if arr.shape[0] == self.num_P:
                     idx = arr.astype(np.int64)
-                elif arr.shape[0] == self.k_max:
+                elif arr.shape[0] == k_curr:
                     w = np.tile(arr.reshape(1, -1), (self.num_P, 1)).astype(np.float32)
                     idx = np.argmax(w * mask, axis=1).astype(np.int64)
                 else:
                     idx[:] = int(arr[0])
             else:
-                w = np.zeros((self.num_P, self.k_max), dtype=np.float32)
+                w = np.zeros((self.num_P, k_curr), dtype=np.float32)
                 n0 = min(self.num_P, arr.shape[0])
-                n1 = min(self.k_max, arr.shape[1])
+                n1 = min(k_curr, arr.shape[1])
                 w[:n0, :n1] = np.asarray(arr[:n0, :n1], dtype=np.float32)
                 idx = np.argmax(w * mask, axis=1).astype(np.int64)
 
-        norm = np.zeros((self.num_P, self.k_max), dtype=np.float32)
+        norm = np.zeros((self.num_P, k_curr), dtype=np.float32)
         for i in range(self.num_P):
             valid_idx = np.where(mask[i] > 0)[0]
             if valid_idx.size == 0:
                 norm[i, 0] = 1.0
                 continue
             sel = int(idx[i])
-            if sel < 0 or sel >= self.k_max or mask[i, sel] <= 0:
+            if sel < 0 or sel >= k_curr or mask[i, sel] <= 0:
                 sel = int(valid_idx[0])
             norm[i, sel] = 1.0
         return norm
 
     def _compute_rewards(self, actions: np.ndarray) -> Dict[str, float]:
-        rewards = {f"p_{i}": 0.0 for i in range(self.num_P)}
         curr_min_dist = self._pairwise_dist().min(axis=1)
-
-        if self.last_min_dist is None:
-            self.last_min_dist = curr_min_dist.copy()
-
-        delta = self.last_min_dist - curr_min_dist
-        for i in range(self.num_P):
-            rewards[f"p_{i}"] += float(self.dist_reward_scale * delta[i])
-
         obs = self._build_obs()
-        cand = obs["candidates"]
-        mask = obs["candidate_mask"]
-        eps = 1e-12
-        for i in range(self.num_P):
-            w = actions[i] * mask[i]
-            s = np.sum(w)
-            if s <= eps:
-                continue
-            w = w / s
-            entropy = -np.sum(w[w > 0] * np.log(w[w > 0] + eps))
-            top_idx = np.argsort(w)[-3:]
-            delta_t = cand[i, top_idx, 4]
-            feasible = float(np.min(delta_t) > 0.0)
-            rewards[f"p_{i}"] += float(self.entropy_lambda * entropy * feasible)
+        rewards = self.reward_fn.compute_step_rewards(
+            actions=actions,
+            obs=obs,
+            curr_min_dist=curr_min_dist,
+            last_min_dist=self.last_min_dist,
+            num_p=self.num_P,
+        )
 
         self.last_min_dist = curr_min_dist.copy()
         return rewards
@@ -904,6 +961,13 @@ class TODCMARLEnv(gym.Env):
         if np.any((d_pp > 0) & (d_pp < self.collision_dist)):
             return True
         return False
+
+    def _check_asset_breach(self) -> bool:
+        if self.PosE.size == 0 or self.ValuePos.size == 0:
+            return False
+
+        dist = np.linalg.norm(self.PosE[:, None, :2] - self.ValuePos[None, :, :2], axis=2)
+        return bool(np.any(dist <= float(self.reward_fn.config.asset_breach_radius)))
 
     @staticmethod
     def _pairwise_self_dist(pos: np.ndarray) -> np.ndarray:
@@ -1019,7 +1083,7 @@ def smoke_test():
             "done": done,
             "truncated": trunc,
             "reward_keys": list(rew.keys()),
-            "candidate_shape": obs["candidates"].shape,
+            "candidate_shape": obs["self_pts"].shape,
         }
     )
 

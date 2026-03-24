@@ -7,7 +7,9 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from marl import TODCMARLEnv, build_actor_critic_schemes
 
@@ -29,13 +31,18 @@ class TrainConfig:
     num_heads: int = 4
     seed: int = 42
     device: str = "cpu"
+    distributed: bool = False
+    ddp_backend: str = "nccl"
+    ddp_find_unused_parameters: bool = False
+    multi_gpu: bool = False
+    gpu_ids: Optional[List[int]] = None
     schemes: Optional[List[str]] = None
     time_res: float = 1.0
-    k_max: int = 32
     step_mode: str = "decision"
     max_inner_ticks: int = 50
     allow_dummy_if_missing: bool = True
     enable_dwa_replan: bool = True
+    reward: Optional[Dict] = None
     wandb_project: str = "dubins-marl-online"
     wandb_entity: Optional[str] = None
     wandb_run_name: Optional[str] = None
@@ -55,8 +62,65 @@ def _set_seed(seed: int):
     torch.manual_seed(seed)
 
 
+@dataclass
+class DistributedContext:
+    enabled: bool
+    rank: int
+    world_size: int
+    local_rank: int
+    is_main: bool
+
+
+def _setup_distributed(cfg: TrainConfig) -> DistributedContext:
+    if not cfg.distributed:
+        return DistributedContext(False, 0, 1, 0, True)
+
+    if not dist.is_available():
+        raise RuntimeError("torch.distributed is not available")
+
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+    if world_size <= 1:
+        return DistributedContext(False, rank, world_size, local_rank, True)
+
+    backend = str(cfg.ddp_backend).lower().strip()
+    if backend == "nccl" and (not torch.cuda.is_available()):
+        raise RuntimeError("DDP backend 'nccl' requires CUDA. Use --ddp-backend gloo on CPU.")
+
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+
+    dist.init_process_group(backend=backend, init_method="env://")
+    return DistributedContext(True, rank, world_size, local_rank, rank == 0)
+
+
+def _cleanup_distributed(ctx: DistributedContext):
+    if ctx.enabled and dist.is_initialized():
+        dist.destroy_process_group()
+
+
 def _str2bool(v: str) -> bool:
     return str(v).strip().lower() in ("1", "true", "t", "yes", "y", "on")
+
+
+def _parse_gpu_ids(text: Optional[str]) -> Optional[List[int]]:
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s:
+        return None
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if len(parts) == 0:
+        return None
+    return [int(p) for p in parts]
+
+
+def _state_dict_for_save(model: torch.nn.Module) -> Dict[str, torch.Tensor]:
+    if hasattr(model, "module") and isinstance(model.module, torch.nn.Module):
+        return model.module.state_dict()
+    return model.state_dict()
 
 
 def _load_config_file(path: str) -> Dict:
@@ -89,78 +153,43 @@ def _to_tensor(x: np.ndarray, device: torch.device, dtype=torch.float32):
     return torch.as_tensor(x, dtype=dtype, device=device)
 
 
-def _angle_from_cos_sin(cos_v: np.ndarray, sin_v: np.ndarray) -> np.ndarray:
-    return np.arctan2(sin_v, cos_v)
-
-
 def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[str, torch.Tensor]:
-    pursuers = np.asarray(obs["pursuers"], dtype=np.float32)  # [P, 6]
-    evaders = np.asarray(obs["evaders"], dtype=np.float32)  # [E, 8]
-    candidates = np.asarray(obs["candidates"], dtype=np.float32)  # [P, K, 6]
-    candidate_mask = np.asarray(obs["candidate_mask"], dtype=np.float32)  # [P, K]
-
-    num_p = pursuers.shape[0]
-    num_e = evaders.shape[0]
-    k_max = candidates.shape[1]
-
-    # self_uav: [x, y, theta]
-    theta_p = _angle_from_cos_sin(pursuers[:, 4], pursuers[:, 5])
-    self_uav = np.stack([pursuers[:, 0], pursuers[:, 1], theta_p], axis=-1)[:, None, :]  # [P,1,3]
-
-    # ally_uavs: each sample excludes itself, shape [P, P-1, 3]
-    ally_uavs = np.zeros((num_p, max(1, num_p - 1), 3), dtype=np.float32)
-    ally_mask = np.zeros((num_p, max(1, num_p - 1)), dtype=bool)
-    for pid in range(num_p):
-        others = [i for i in range(num_p) if i != pid]
-        if len(others) == 0:
-            continue
-        vals = np.stack([pursuers[others, 0], pursuers[others, 1], theta_p[others]], axis=-1)
-        ally_uavs[pid, : len(others)] = vals
-        ally_mask[pid, : len(others)] = True
-
-    # self_pts: pad candidate 6D -> 8D (append zeros)
-    self_pts = np.zeros((num_p, k_max, 8), dtype=np.float32)
-    self_pts[:, :, :6] = candidates
-    self_pts_mask = candidate_mask > 0
-
-    # ally_pts: concat others' candidate points for each sample, shape [P, (P-1)*K, 8]
-    ally_pts_len = max(1, (num_p - 1) * k_max)
-    ally_pts = np.zeros((num_p, ally_pts_len, 8), dtype=np.float32)
-    ally_pts_mask = np.zeros((num_p, ally_pts_len), dtype=bool)
-    for pid in range(num_p):
-        others = [i for i in range(num_p) if i != pid]
-        if len(others) == 0:
-            continue
-        block = self_pts[others].reshape(len(others) * k_max, 8)
-        block_mask = self_pts_mask[others].reshape(len(others) * k_max)
-        ally_pts[pid, : block.shape[0]] = block
-        ally_pts_mask[pid, : block.shape[0]] = block_mask
-
-    # enemies: [x, y, theta]
-    theta_e = _angle_from_cos_sin(evaders[:, 4], evaders[:, 5])
-    enemies = np.stack([evaders[:, 0], evaders[:, 1], theta_e], axis=-1)[None, :, :].repeat(num_p, axis=0)
-    enemy_mask = np.ones((num_p, num_e), dtype=bool)
-
-    # targets from evader inferred target fields [tx, ty]
-    targets = evaders[:, 6:8][None, :, :].repeat(num_p, axis=0)
-    target_mask = np.ones((num_p, num_e), dtype=bool)
+    required_keys = {
+        "self_uav",
+        "ally_uavs",
+        "self_pts",
+        "ally_pts",
+        "enemies",
+        "targets",
+        "ally_mask",
+        "self_pts_mask",
+        "ally_pts_mask",
+        "enemy_mask",
+        "target_mask",
+    }
+    missing = [k for k in required_keys if k not in obs]
+    if missing:
+        raise KeyError(f"Environment observation missing model keys: {missing}")
 
     return {
-        "self_uav": _to_tensor(self_uav, device),
-        "ally_uavs": _to_tensor(ally_uavs, device),
-        "self_pts": _to_tensor(self_pts, device),
-        "ally_pts": _to_tensor(ally_pts, device),
-        "enemies": _to_tensor(enemies, device),
-        "targets": _to_tensor(targets, device),
-        "ally_mask": _to_tensor(ally_mask, device, dtype=torch.bool),
-        "self_pts_mask": _to_tensor(self_pts_mask, device, dtype=torch.bool),
-        "ally_pts_mask": _to_tensor(ally_pts_mask, device, dtype=torch.bool),
-        "enemy_mask": _to_tensor(enemy_mask, device, dtype=torch.bool),
-        "target_mask": _to_tensor(target_mask, device, dtype=torch.bool),
+        "self_uav": _to_tensor(np.asarray(obs["self_uav"], dtype=np.float32), device),
+        "ally_uavs": _to_tensor(np.asarray(obs["ally_uavs"], dtype=np.float32), device),
+        "self_pts": _to_tensor(np.asarray(obs["self_pts"], dtype=np.float32), device),
+        "ally_pts": _to_tensor(np.asarray(obs["ally_pts"], dtype=np.float32), device),
+        "enemies": _to_tensor(np.asarray(obs["enemies"], dtype=np.float32), device),
+        "targets": _to_tensor(np.asarray(obs["targets"], dtype=np.float32), device),
+        "ally_mask": _to_tensor(np.asarray(obs["ally_mask"], dtype=bool), device, dtype=torch.bool),
+        "self_pts_mask": _to_tensor(np.asarray(obs["self_pts_mask"], dtype=bool), device, dtype=torch.bool),
+        "ally_pts_mask": _to_tensor(np.asarray(obs["ally_pts_mask"], dtype=bool), device, dtype=torch.bool),
+        "enemy_mask": _to_tensor(np.asarray(obs["enemy_mask"], dtype=bool), device, dtype=torch.bool),
+        "target_mask": _to_tensor(np.asarray(obs["target_mask"], dtype=bool), device, dtype=torch.bool),
     }
 
 
-def _init_wandb(cfg: TrainConfig, schemes: Sequence[str]):
+def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = True):
+    if not enabled:
+        return None
+
     if cfg.wandb_mode == "disabled":
         return None
 
@@ -228,8 +257,42 @@ def _run_eval_episode(
 
 
 def train_online(cfg: TrainConfig):
-    _set_seed(cfg.seed)
-    device = torch.device(cfg.device)
+    dist_ctx = _setup_distributed(cfg)
+    _set_seed(cfg.seed + dist_ctx.rank)
+
+    requested_device = str(cfg.device).lower()
+    use_cuda = requested_device.startswith("cuda") and torch.cuda.is_available()
+    if requested_device.startswith("cuda") and (not torch.cuda.is_available()) and dist_ctx.is_main:
+        print("[WARN] CUDA requested but unavailable, fallback to CPU.")
+
+    gpu_ids = list(cfg.gpu_ids) if cfg.gpu_ids else None
+    use_data_parallel = False
+
+    if dist_ctx.enabled:
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{dist_ctx.local_rank}")
+        else:
+            device = torch.device("cpu")
+        if cfg.multi_gpu and dist_ctx.is_main:
+            print("[WARN] --multi-gpu is ignored when --distributed=true (DDP takes over).")
+    else:
+        if use_cuda and cfg.multi_gpu:
+            n_gpu = torch.cuda.device_count()
+            if gpu_ids is None:
+                gpu_ids = list(range(n_gpu))
+            else:
+                gpu_ids = [i for i in gpu_ids if 0 <= i < n_gpu]
+            use_data_parallel = len(gpu_ids) > 1
+
+        if use_cuda:
+            if use_data_parallel:
+                device = torch.device(f"cuda:{gpu_ids[0]}")
+            elif gpu_ids and len(gpu_ids) == 1:
+                device = torch.device(f"cuda:{gpu_ids[0]}")
+            else:
+                device = torch.device(requested_device)
+        else:
+            device = torch.device("cpu")
 
     models = build_actor_critic_schemes(
         cfg.schemes,
@@ -238,7 +301,28 @@ def train_online(cfg: TrainConfig):
         device=device,
     )
 
-    run = _init_wandb(cfg, list(models.keys()))
+    if dist_ctx.enabled:
+        wrapped = {}
+        for name, model in models.items():
+            wrapped[name] = DDP(
+                model,
+                device_ids=[device.index] if device.type == "cuda" else None,
+                output_device=device.index if device.type == "cuda" else None,
+                find_unused_parameters=bool(cfg.ddp_find_unused_parameters),
+            )
+        models = wrapped
+        if dist_ctx.is_main:
+            print(
+                f"[INFO] DDP enabled: world_size={dist_ctx.world_size}, backend={cfg.ddp_backend}, local_rank={dist_ctx.local_rank}"
+            )
+    elif use_data_parallel and gpu_ids is not None:
+        wrapped = {}
+        for name, model in models.items():
+            wrapped[name] = torch.nn.DataParallel(model, device_ids=gpu_ids, output_device=gpu_ids[0])
+        models = wrapped
+        print(f"[INFO] DataParallel enabled on GPUs: {gpu_ids}")
+
+    run = _init_wandb(cfg, list(models.keys()), enabled=dist_ctx.is_main)
 
     envs: Dict[str, TODCMARLEnv] = {}
     opts: Dict[str, torch.optim.Optimizer] = {}
@@ -249,11 +333,11 @@ def train_online(cfg: TrainConfig):
                 "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
                 "render_mode": "none",
                 "max_episode_steps": cfg.max_episode_steps,
-                "k_max": cfg.k_max,
                 "time_res": cfg.time_res,
                 "step_mode": cfg.step_mode,
                 "max_inner_ticks": cfg.max_inner_ticks,
                 "enable_dwa_replan": cfg.enable_dwa_replan,
+                "reward": cfg.reward,
             }
         )
         opts[scheme_name] = torch.optim.Adam(model.parameters(), lr=cfg.lr)
@@ -272,7 +356,7 @@ def train_online(cfg: TrainConfig):
             env = envs[scheme_name]
             opt = opts[scheme_name]
 
-            obs_np, _ = env.reset(seed=cfg.seed + ep)
+            obs_np, _ = env.reset(seed=cfg.seed + ep + dist_ctx.rank * 100000)
             done = False
             trunc = False
             ep_return = 0.0
@@ -293,8 +377,26 @@ def train_online(cfg: TrainConfig):
                 logp = dist.log_prob(actions)  # [P]
                 entropy = dist.entropy().mean()
 
-                next_obs_np, rewards, terms, truncs, infos = env.step(actions.detach().cpu().numpy())
-
+                # --- 统计奖励分项 ---
+                # 1. step reward 分项
+                rewards, reward_details = env.reward_fn.compute_step_rewards(
+                    actions=actions.detach().cpu().numpy(),
+                    obs=obs_np,
+                    curr_min_dist=env._pairwise_dist().min(axis=1),
+                    last_min_dist=env.last_min_dist,
+                    num_p=env.num_P,
+                    return_details=True,
+                )
+                env.last_min_dist = env._pairwise_dist().min(axis=1)
+                # 2. 终局奖励分项
+                asset_breached = env._check_asset_breach()
+                env.reward_fn.apply_terminal_rewards(
+                    rewards,
+                    captured_delta=int(np.sum(~env.Capflag & env._check_collision())),
+                    num_e=env.num_E,
+                    asset_breached=asset_breached,
+                    details=reward_details,
+                )
                 reward_vec = np.array([rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
                 reward_t = _to_tensor(reward_vec, device)
 
@@ -327,9 +429,22 @@ def train_online(cfg: TrainConfig):
                 if run is not None:
                     mean_inner_ticks = float(np.mean([infos[f"p_{i}"]["inner_ticks"] for i in range(env.num_P)]))
                     replanned = float(np.mean([float(infos[f"p_{i}"]["replanned"]) for i in range(env.num_P)]))
+                    # step级奖励分项统计
+                    r_qual = np.mean([reward_details[f"p_{i}"]["r_qual"] for i in range(env.num_P)])
+                    r_global = np.mean([reward_details[f"p_{i}"]["r_global"] for i in range(env.num_P)])
+                    r_safe = np.mean([reward_details[f"p_{i}"]["r_safe"] for i in range(env.num_P)])
+                    r_time = np.mean([reward_details[f"p_{i}"]["r_time"] for i in range(env.num_P)])
+                    terminal_bonus = reward_details.get("terminal_bonus", 0.0)
+                    terminal_penalty = reward_details.get("terminal_penalty", 0.0)
                     run.log(
                         {
                             f"{scheme_name}/step_reward": float(reward_t.mean().item()),
+                            f"{scheme_name}/r_qual": r_qual,
+                            f"{scheme_name}/r_global": r_global,
+                            f"{scheme_name}/r_safe": r_safe,
+                            f"{scheme_name}/r_time": r_time,
+                            f"{scheme_name}/terminal_bonus": terminal_bonus,
+                            f"{scheme_name}/terminal_penalty": terminal_penalty,
                             f"{scheme_name}/policy_loss": float(policy_loss.item()),
                             f"{scheme_name}/value_loss": float(value_loss.item()),
                             f"{scheme_name}/entropy": float(entropy.item()),
@@ -344,6 +459,8 @@ def train_online(cfg: TrainConfig):
 
                 obs_np = next_obs_np
 
+            # 统计本episode资产受损次数
+            asset_breach_count = sum([infos[f"p_{i}"]["asset_breached"] for i in range(env.num_P)])
             ep_stats = {
                 "episode": ep,
                 "return": ep_return,
@@ -351,6 +468,7 @@ def train_online(cfg: TrainConfig):
                 "policy_loss": ep_policy_loss / max(1, ep_steps),
                 "value_loss": ep_value_loss / max(1, ep_steps),
                 "entropy": ep_entropy / max(1, ep_steps),
+                "asset_breach_count": asset_breach_count,
             }
             history[scheme_name].append(ep_stats)
 
@@ -362,21 +480,22 @@ def train_online(cfg: TrainConfig):
                         f"{scheme_name}/episode_policy_loss": ep_stats["policy_loss"],
                         f"{scheme_name}/episode_value_loss": ep_stats["value_loss"],
                         f"{scheme_name}/episode_entropy": ep_stats["entropy"],
+                        f"{scheme_name}/episode_asset_breach_count": ep_stats["asset_breach_count"],
                         "episode": ep,
                     }
                 )
 
-            if cfg.eval_interval > 0 and (ep % cfg.eval_interval) == 0:
+            if dist_ctx.is_main and cfg.eval_interval > 0 and (ep % cfg.eval_interval) == 0:
                 eval_env = TODCMARLEnv(
                     {
                         "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
                         "render_mode": "none",
                         "max_episode_steps": cfg.max_episode_steps,
-                        "k_max": cfg.k_max,
                         "time_res": cfg.time_res,
                         "step_mode": cfg.step_mode,
                         "max_inner_ticks": cfg.max_inner_ticks,
                         "enable_dwa_replan": cfg.enable_dwa_replan,
+                        "reward": cfg.reward,
                     }
                 )
 
@@ -395,7 +514,7 @@ def train_online(cfg: TrainConfig):
                 if cfg.save_best and mean_eval_return > best_eval_return[scheme_name]:
                     best_eval_return[scheme_name] = mean_eval_return
                     best_path = os.path.join(cfg.save_dir, f"{scheme_name.replace(' ', '_')}_best.pt")
-                    torch.save(model.state_dict(), best_path)
+                    torch.save(_state_dict_for_save(model), best_path)
                     print(f"[Best Saved] {best_path} eval_return={mean_eval_return:.3f}")
 
                 if cfg.save_replay and last_trace is not None:
@@ -414,20 +533,23 @@ def train_online(cfg: TrainConfig):
                         }
                     )
 
-            if (ep % cfg.log_interval) == 0:
+            if dist_ctx.is_main and (ep % cfg.log_interval) == 0:
                 print(
                     f"[Episode {ep:04d}] [{scheme_name}] return={ep_stats['return']:.3f} "
                     f"steps={ep_stats['steps']} policy={ep_stats['policy_loss']:.4f} "
                     f"value={ep_stats['value_loss']:.4f} entropy={ep_stats['entropy']:.4f}"
                 )
 
-    for scheme_name, model in models.items():
-        ckpt_path = os.path.join(cfg.save_dir, f"{scheme_name.replace(' ', '_')}_last.pt")
-        torch.save(model.state_dict(), ckpt_path)
-        print(f"[Saved] {ckpt_path}")
+    if dist_ctx.is_main:
+        for scheme_name, model in models.items():
+            ckpt_path = os.path.join(cfg.save_dir, f"{scheme_name.replace(' ', '_')}_last.pt")
+            torch.save(_state_dict_for_save(model), ckpt_path)
+            print(f"[Saved] {ckpt_path}")
 
     if run is not None:
         run.finish()
+
+    _cleanup_distributed(dist_ctx)
 
     return history
 
@@ -437,7 +559,7 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     if defaults:
         parser.set_defaults(**defaults)
 
-    parser.add_argument("--config", type=str, default=None, help="Path to JSON/YAML config")
+    parser.add_argument("--config", type=str, default="./configs/train_online0324.yaml", help="Path to JSON/YAML config")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--max-episode-steps", type=int, default=200)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -448,13 +570,18 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--distributed", type=_str2bool, default=False)
+    parser.add_argument("--ddp-backend", type=str, default="nccl", choices=["nccl", "gloo"])
+    parser.add_argument("--ddp-find-unused-parameters", type=_str2bool, default=False)
+    parser.add_argument("--multi-gpu", type=_str2bool, default=False)
+    parser.add_argument("--gpu-ids", type=str, default="", help="Comma-separated GPU ids, e.g. 0,1,2")
     parser.add_argument("--schemes", type=str, nargs="*", default=None)
     parser.add_argument("--time-res", type=float, default=1.0)
-    parser.add_argument("--k-max", type=int, default=32)
     parser.add_argument("--step-mode", type=str, default="decision", choices=["decision", "time"])
     parser.add_argument("--max-inner-ticks", type=int, default=50)
     parser.add_argument("--allow-dummy-if-missing", type=_str2bool, default=True)
     parser.add_argument("--enable-dwa-replan", type=_str2bool, default=True)
+    parser.add_argument("--reward-json", type=str, default=None, help="Inline JSON for reward config")
     parser.add_argument("--wandb-project", type=str, default="dubins-marl-online")
     parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--wandb-run-name", type=str, default=None)
@@ -486,6 +613,10 @@ def _parse_args() -> TrainConfig:
 
     args = parser.parse_args()
 
+    reward_cfg = getattr(args, "reward", None)
+    if args.reward_json:
+        reward_cfg = json.loads(args.reward_json)
+
     return TrainConfig(
         episodes=args.episodes,
         max_episode_steps=args.max_episode_steps,
@@ -497,13 +628,18 @@ def _parse_args() -> TrainConfig:
         num_heads=args.num_heads,
         seed=args.seed,
         device=args.device,
+        distributed=bool(args.distributed),
+        ddp_backend=args.ddp_backend,
+        ddp_find_unused_parameters=bool(args.ddp_find_unused_parameters),
+        multi_gpu=bool(args.multi_gpu),
+        gpu_ids=_parse_gpu_ids(args.gpu_ids),
         schemes=args.schemes,
         time_res=args.time_res,
-        k_max=args.k_max,
         step_mode=args.step_mode,
         max_inner_ticks=args.max_inner_ticks,
         allow_dummy_if_missing=bool(args.allow_dummy_if_missing),
         enable_dwa_replan=bool(args.enable_dwa_replan),
+        reward=reward_cfg,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_run_name=args.wandb_run_name,

@@ -9,17 +9,16 @@ def test_marl_env_reset_and_step_smoke():
             "allow_dummy_if_missing": True,
             "render_mode": "none",
             "max_episode_steps": 20,
-            "k_max": 16,
             "step_mode": "time",
         }
     )
 
     obs, info = env.reset()
-    assert "pursuers" in obs
-    assert "evaders" in obs
-    assert "candidates" in obs
-    assert "candidate_mask" in obs
-    assert obs["candidates"].shape[1] == 16
+    assert "self_uav" in obs
+    assert "enemies" in obs
+    assert "self_pts" in obs
+    assert "self_pts_mask" in obs
+    assert obs["self_pts"].shape[1] >= 1
     assert isinstance(info["real_mode"], bool)
 
     done = False

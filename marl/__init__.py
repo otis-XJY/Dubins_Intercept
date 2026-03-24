@@ -8,6 +8,7 @@ from .models import (
 	resolve_design_mode,
 )
 from .obs_generator import TODCObservationGenerator
+from .rewards import RewardConfig, TODCRewardFunction
 
 __all__ = [
 	"TODCMARLEnv",
@@ -18,4 +19,6 @@ __all__ = [
 	"resolve_design_mode",
 	"design_mode_to_name",
 	"build_actor_critic_schemes",
+	"RewardConfig",
+	"TODCRewardFunction",
 ]

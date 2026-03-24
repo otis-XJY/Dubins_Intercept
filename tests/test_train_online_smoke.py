@@ -3,7 +3,7 @@ from pathlib import Path
 
 torch = pytest.importorskip("torch")
 
-from marl.train_online import TrainConfig, _load_config_file, train_online
+from marl.train_online import TrainConfig, _load_config_file, _parse_gpu_ids, train_online
 
 
 def test_train_online_single_scheme_smoke():
@@ -19,7 +19,6 @@ def test_train_online_single_scheme_smoke():
         seed=7,
         device="cpu",
         schemes=["Concatenative Query Network"],
-        k_max=8,
         step_mode="time",
         max_inner_ticks=3,
         allow_dummy_if_missing=True,
@@ -44,7 +43,6 @@ def test_train_online_eval_best_and_replay(tmp_path: Path):
         num_heads=4,
         device="cpu",
         schemes=["Gated Query Network"],
-        k_max=8,
         step_mode="time",
         max_inner_ticks=2,
         allow_dummy_if_missing=True,
@@ -68,13 +66,31 @@ def test_train_online_eval_best_and_replay(tmp_path: Path):
 
 def test_load_config_file_yaml_and_json(tmp_path: Path):
     yaml_path = tmp_path / "cfg.yaml"
-    yaml_path.write_text("episodes: 3\nstep_mode: decision\n", encoding="utf-8")
+    yaml_path.write_text(
+        "episodes: 3\n"
+        "step_mode: decision\n"
+        "multi_gpu: true\n"
+        "gpu_ids: [0, 1]\n"
+        "reward:\n"
+        "  dist_progress_scale: 0.08\n",
+        encoding="utf-8",
+    )
     cfg_yaml = _load_config_file(str(yaml_path))
     assert cfg_yaml["episodes"] == 3
     assert cfg_yaml["step_mode"] == "decision"
+    assert cfg_yaml["multi_gpu"] is True
+    assert cfg_yaml["gpu_ids"] == [0, 1]
+    assert cfg_yaml["reward"]["dist_progress_scale"] == 0.08
 
     json_path = tmp_path / "cfg.json"
-    json_path.write_text('{"episodes": 4, "k_max": 16}', encoding="utf-8")
+    json_path.write_text('{"episodes": 4, "max_inner_ticks": 16}', encoding="utf-8")
     cfg_json = _load_config_file(str(json_path))
     assert cfg_json["episodes"] == 4
-    assert cfg_json["k_max"] == 16
+    assert cfg_json["max_inner_ticks"] == 16
+
+
+def test_parse_gpu_ids():
+    assert _parse_gpu_ids(None) is None
+    assert _parse_gpu_ids("") is None
+    assert _parse_gpu_ids("0") == [0]
+    assert _parse_gpu_ids("0,1,3") == [0, 1, 3]
