@@ -66,6 +66,7 @@ class TODCRewardFunction:
         curr_min_dist: np.ndarray,
         last_min_dist: Optional[np.ndarray],
         num_p: int,
+        inner_ticks_delta: int = 1,
         return_details: bool = False,
     ) -> Dict[str, float]:
         rewards = {f"p_{i}": 0.0 for i in range(num_p)}
@@ -77,29 +78,58 @@ class TODCRewardFunction:
             details[f"p_{i}"]["r_progress"] = float(self.config.dist_progress_scale * delta[i])
             rewards[f"p_{i}"] += details[f"p_{i}"]["r_progress"]
 
-        self_pts = np.asarray(obs.get("self_pts", np.zeros((num_p, 1, 8), dtype=np.float32)), dtype=np.float32)
-        mask = np.asarray(obs.get("self_pts_mask", np.ones((num_p, self_pts.shape[1]), dtype=np.float32)), dtype=np.float32)
+        reward_nodes = np.asarray(obs.get("reward_nodes", np.zeros((num_p, 1, 8), dtype=np.float32)), dtype=np.float32)
+        mask = np.asarray(obs.get("self_pts_mask", np.ones((num_p, reward_nodes.shape[1]), dtype=np.float32)), dtype=np.float32)
         enemies = np.asarray(obs.get("enemies", np.zeros((num_p, 0, 3), dtype=np.float32)), dtype=np.float32)
 
-        k_curr = self_pts.shape[1]
+        k_curr = reward_nodes.shape[1]
         selected_idx = np.zeros((num_p,), dtype=np.int64)
-        for i in range(num_p):
-            w = np.asarray(actions[i], dtype=np.float32)
-            if w.shape[0] != k_curr:
+        # 支持两种动作输入格式：
+        # - 每个 agent 的采样索引（形状 (num_p,) 或标量/整型）
+        # - 每个 agent 的权重向量 / 概率分布（形状 (num_p, k_curr))
+        actions_arr = np.asarray(actions)
+        if actions_arr.ndim == 1:
+            # 视作每个 agent 的索引
+            for i in range(num_p):
+                try:
+                    idx = int(actions_arr[i])
+                except Exception:
+                    valid_idx = np.where(mask[i] > 0)[0]
+                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
+                    continue
                 valid_idx = np.where(mask[i] > 0)[0]
-                selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
-                continue
-            weighted = w * mask[i]
-            if np.sum(weighted) <= 1e-12:
-                valid_idx = np.where(mask[i] > 0)[0]
-                selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
-            else:
-                selected_idx[i] = int(np.argmax(weighted))
+                if idx < 0 or idx >= k_curr or (valid_idx.size > 0 and not (mask[i, idx] > 0)):
+                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
+                else:
+                    selected_idx[i] = idx
+        else:
+            for i in range(num_p):
+                w = actions_arr[i]
+                w = np.asarray(w, dtype=np.float32)
+                if w.ndim == 0:
+                    # 标量 -> 视作索引
+                    idx = int(w)
+                    valid_idx = np.where(mask[i] > 0)[0]
+                    if idx < 0 or idx >= k_curr or (valid_idx.size > 0 and not (mask[i, idx] > 0)):
+                        selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
+                    else:
+                        selected_idx[i] = idx
+                    continue
+                if w.shape[0] != k_curr:
+                    valid_idx = np.where(mask[i] > 0)[0]
+                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
+                    continue
+                weighted = w * mask[i]
+                if np.sum(weighted) <= 1e-12:
+                    valid_idx = np.where(mask[i] > 0)[0]
+                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
+                else:
+                    selected_idx[i] = int(np.argmax(weighted))
 
-        selected = self_pts[np.arange(num_p), selected_idx]  # [P, 8]
+        selected = reward_nodes[np.arange(num_p), selected_idx]  # [P, 8]
 
         dist_v = selected[:, 7]
-        delta_t = np.maximum(0.0, selected[:, 3])
+        delta_t = selected[:, 3]
         delta_d = selected[:, 4]
         delta_theta = selected[:, 5]
         path_l = selected[:, 6]
@@ -149,7 +179,8 @@ class TODCRewardFunction:
         for i in range(num_p):
             details[f"p_{i}"]["r_safe"] = float(r_safe[i])
 
-        r_time = float(self.config.step_cost)
+        # 时间惩罚按本次决策内 tick 数变化计：step_cost * inner_ticks_delta
+        r_time = float(self.config.step_cost) * float(inner_ticks_delta)
         for i in range(num_p):
             details[f"p_{i}"]["r_time"] = r_time
 

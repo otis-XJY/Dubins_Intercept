@@ -442,6 +442,7 @@ def train_online(cfg: TrainConfig):
             ep_entropy = 0.0
             ep_steps = 0
 
+            # env.step 对应一次 DWA 决策（main0319 中 if not flagIn 重规划）；TimeRes/Stepsize 的物理时间在 env 内部推进。
             while (not done) and (not trunc):
                 obs_t = _build_model_obs(obs_np, device)
                 out = model(obs_t)
@@ -454,29 +455,31 @@ def train_online(cfg: TrainConfig):
                 logp = dist.log_prob(actions)  # [P]
                 entropy = dist.entropy().mean()
 
-                # Advance environment and obtain canonical rewards/infos
-                prev_last_min = None if env.last_min_dist is None else env.last_min_dist.copy()
                 next_obs_np, env_rewards, terms, truncs, infos = env.step(actions.detach().cpu().numpy())
 
                 # Use environment-returned rewards for training target
                 reward_vec = np.array([env_rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
                 reward_t = _to_tensor(reward_vec, device)
 
-                # Recompute detailed breakdown for logging using the same inputs env used
+                # Use reward breakdown computed by the environment (avoid recomputing here)
                 try:
-                    inner_ticks_delta = int(np.mean([infos[f"p_{i}"]["inner_ticks"] for i in range(env.num_P)]))
+                    reward_details = infos.get("_reward_details_all")
                 except Exception:
-                    inner_ticks_delta = 1
+                    reward_details = None
 
-                reward_details = env.reward_fn.compute_step_rewards(
-                    actions=actions.detach().cpu().numpy(),
-                    obs=next_obs_np,
-                    curr_min_dist=env._pairwise_dist().min(axis=1),
-                    last_min_dist=prev_last_min,
-                    num_p=env.num_P,
-                    inner_ticks_delta=inner_ticks_delta,
-                    return_details=True,
-                )
+                # fallback to minimal per-agent map if env did not provide details
+                if reward_details is None:
+                    reward_details = {
+                        f"p_{i}": {
+                            "r_qual": float(env_rewards[f"p_{i}"]),
+                            "r_global": 0.0,
+                            "r_safe": 0.0,
+                            "r_time": 0.0,
+                        }
+                        for i in range(env.num_P)
+                    }
+                    reward_details["terminal_bonus"] = 0.0
+                    reward_details["terminal_penalty"] = 0.0
 
                 done = bool(terms["__all__"])
                 trunc = bool(truncs["__all__"])

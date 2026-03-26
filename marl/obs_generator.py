@@ -1,9 +1,24 @@
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
-
+from intercept.IsoPair.obtainRLOutput import _extract_iso_points
 import numpy as np
 
 
+# 列解释 (18列):
+# 0-1: te, tp
+# 2-3: ETPid, PTPid
+# 4-5: IsoPosidxE, IsoPosidxP
+# 6: Iso_dist
+# 7: path_len (pathidP[:, 2])
+# 8: cost
+# 9: Eid对应的ValPosid (pathidE[:, 1])
+# 10: Pid对应的TPid (pathidP[:, 1])
+# 11-12: Eid, Pid (原始ID)/[0 1]而不是[0 2]
+# 13: Eiso (pathidE[:, 2])
+# 14: Piso (pathidP[:, 2])
+# //15-17: costAll (如果是向量/矩阵，拼接全量)
+# 15-19:(Delta_t, Delta_d, Delta_v, Delta_L,Delta_V,
+# 20-24:cost_t, cost_d, cost_v, cost_L, cost_V))
 @dataclass(frozen=True)
 class CandidateColumns:
     te: int = 0
@@ -12,6 +27,17 @@ class CandidateColumns:
     inferred_value_id: int = 9
     eid_ref: int = 11
     pid_ref: int = 12
+    Delta_t: int = 15
+    Delta_d: int = 16
+    Delta_theta: int = 17
+    path_L: int = 18
+    Delta_V: int = 19
+    cost_t: int = 20
+    cost_d: int = 21
+    cost_theta: int = 22
+    cost_L: int = 23
+    cost_V: int = 24
+
 
 
 class TODCObservationGenerator:
@@ -37,7 +63,7 @@ class TODCObservationGenerator:
     ) -> Dict[str, np.ndarray]:
         v_p_nodes = self._build_p_nodes(pos_p, v_p)
         v_e_nodes = self._build_e_nodes(pos_e, v_e, value_pos, inferred_targets)
-        v_c_nodes, v_c_mask = self._build_c_nodes(
+        v_c_nodes, v_c_mask, reward_nodes = self._build_c_nodes(
             ic_candidates=ic_candidates,
             num_p=num_p,
             num_e=num_e,
@@ -53,6 +79,7 @@ class TODCObservationGenerator:
             v_c_nodes=v_c_nodes,
             v_c_mask=v_c_mask,
             value_pos=value_pos,
+            reward_nodes=reward_nodes,
         )
         return model_obs
 
@@ -64,6 +91,7 @@ class TODCObservationGenerator:
         v_c_nodes: np.ndarray,
         v_c_mask: np.ndarray,
         value_pos: np.ndarray,
+        reward_nodes: np.ndarray,
     ) -> Dict[str, np.ndarray]:
         """Build obs tensors already aligned to UAVInterceptionNetwork.forward inputs."""
         num_p = v_p_nodes.shape[0]
@@ -86,7 +114,8 @@ class TODCObservationGenerator:
             ally_uavs[pid, : len(others)] = vals
             ally_mask[pid, : len(others)] = True
 
-        # self_pts: [P, K, 8] = (x,y,theta,Delta_t,Delta_d,Delta_theta,pathL,DistanceV)
+        # self_pts: [P, K, 8] = (x,y,theta,Delta_t,Delta_d,Delta_.
+        # theta,pathL,DistanceV)
         self_pts = np.asarray(v_c_nodes, dtype=np.float32)
         self_pts_mask = v_c_mask > 0.0
 
@@ -128,6 +157,7 @@ class TODCObservationGenerator:
             "enemies": enemies,
             "targets": targets,
             "assets": assets,
+            "reward_nodes": reward_nodes,
             "ally_mask": ally_mask,
             "self_pts_mask": self_pts_mask,
             "ally_pts_mask": ally_pts_mask,
@@ -186,7 +216,7 @@ class TODCObservationGenerator:
         pos_e: np.ndarray,
         value_pos: np.ndarray,
         candidate_pos_fn: Optional[Callable[[np.ndarray, int], Tuple[float, float]]],
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         subsets = []
         max_k = 0
         for pid in range(num_p):
@@ -203,6 +233,7 @@ class TODCObservationGenerator:
         max_k = max(1, max_k)
 
         nodes = np.zeros((num_p, max_k, 8), dtype=np.float32)
+        reward_nodes = np.zeros((num_p, max_k, 8), dtype=np.float32)
         mask = np.zeros((num_p, max_k), dtype=np.float32)
 
         for pid in range(num_p):
@@ -214,30 +245,42 @@ class TODCObservationGenerator:
             for i in range(n):
                 row = subset[i]
                 if candidate_pos_fn is not None:
-                    c_x, c_y = candidate_pos_fn(row, pid)
-                else:
-                    eid = int(row[self.cols.eid_ref]) if row.shape[0] > self.cols.eid_ref else pid % max(1, num_e)
-                    eid = max(0, min(eid, num_e - 1))
-                    c_x, c_y = float(pos_e[eid, 0]), float(pos_e[eid, 1])
+                    c_x, c_y, theta = candidate_pos_fn(row, pid)
+                # else:
+                #     eid = int(row[self.cols.eid_ref]) if row.shape[0] > self.cols.eid_ref else pid % max(1, num_e)
+                #     eid = max(0, min(eid, num_e - 1))
+                #     c_x, c_y = float(pos_e[eid, 0]), float(pos_e[eid, 1])
 
                 t_p = float(row[self.cols.tp]) if row.shape[0] > self.cols.tp else 0.0
                 t_e = float(row[self.cols.te]) if row.shape[0] > self.cols.te else 0.0
-                path_l = float(row[self.cols.cost]) if row.shape[0] > self.cols.cost else 0.0
-                delta_t = t_e - t_p
+                path_l = float(row[self.cols.path_L]) if row.shape[0] > self.cols.path_L else 0.0
+                cost_l = float(row[self.cols.cost_L]) if row.shape[0] > self.cols.cost_L else 0.0
+                delta_t = float(row[self.cols.Delta_t]) if row.shape[0] > self.cols.Delta_t else 0.0
+                cost_t = float(row[self.cols.cost_t]) if row.shape[0] > self.cols.cost_t else 0.0
 
                 p_x, p_y, p_th = float(pos_p[pid, 0]), float(pos_p[pid, 1]), float(pos_p[pid, 2])
                 vec_x, vec_y = c_x - p_x, c_y - p_y
                 theta = float(np.arctan2(vec_y, vec_x)) if (abs(vec_x) + abs(vec_y)) > 1e-9 else p_th
 
                 # Approximate intercept deviation features from available geometry
-                delta_d = float(np.hypot(vec_x, vec_y))
-                delta_theta = float(abs(np.arctan2(np.sin(theta - p_th), np.cos(theta - p_th))))
-                distance_v = float(np.min(np.linalg.norm(value_pos[:, :2] - np.array([c_x, c_y]), axis=1)))
+                delta_d = float(row[self.cols.Delta_d]) if row.shape[0] > self.cols.Delta_d else 0.0
+                cost_d = float(row[self.cols.cost_d]) if row.shape[0] > self.cols.cost_d else 0.0
+                delta_theta = float(row[self.cols.Delta_theta]) if row.shape[0] > self.cols.Delta_theta else 0.0
+                cost_theta = float(row[self.cols.cost_theta]) if row.shape[0] > self.cols.cost_theta else 0.0
+                distance_V = float(row[self.cols.Delta_V]) if row.shape[0] > self.cols.Delta_V else 0.0
+                cost_V = float(row[self.cols.cost_V]) if row.shape[0] > self.cols.cost_V else 0.0
 
                 nodes[pid, i] = np.array(
-                    [c_x, c_y, theta, delta_t, delta_d, delta_theta, path_l, distance_v],
+                    [c_x, c_y, theta, delta_t, delta_d, delta_theta, path_l, distance_V],
                     dtype=np.float32,
                 )
-                mask[pid, i] = 1.0
 
-        return nodes, mask
+                reward_nodes[pid, i] = np.array(
+                    [c_x, c_y, theta, cost_t, cost_d, cost_theta, cost_l, cost_V],
+                    dtype=np.float32,
+                )
+
+                mask[pid, i] = 1.0
+                # （x,y,theta,Delta_t,Delta_d,Delta_theta,pathL,DistanceV）
+
+        return nodes, mask, reward_nodes

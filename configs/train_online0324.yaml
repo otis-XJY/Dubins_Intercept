@@ -12,7 +12,7 @@ distributed: false
 ddp_backend: nccl
 ddp_find_unused_parameters: false
 multi_gpu: true
-gpu_ids: 4,5,6
+gpu_ids: 1
 schemes:
   - Concatenative Query Network
   - Gated Query Network

@@ -1,4 +1,5 @@
 import argparse
+import sys
 import json
 import os
 import random
@@ -10,6 +11,9 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
+import imageio
+import tempfile
+import io
 
 from marl import TODCMARLEnv, build_actor_critic_schemes
 
@@ -54,6 +58,9 @@ class TrainConfig:
     save_best: bool = True
     save_replay: bool = True
     replay_dir: str = "output/eval_traces"
+    # Visualization settings
+    step_frame_interval: int = 50
+    eval_video_fps: int = 10
 
 
 def _set_seed(seed: int):
@@ -206,7 +213,67 @@ def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = Tru
             **cfg.__dict__,
             "schemes": list(schemes),
         },
+        tags=["MARL", "TODC", "reward-inspect"],
+        notes="Online MARL training run; watch reward components r_qual/r_global/r_safe/r_time",
     )
+
+    # Define commonly used metrics so W&B UI can align step/episode axes and present them nicely.
+    # Step-level metrics should use `global_step` as the x-axis; episode-level use `episode`.
+    step_metrics = [
+        "step_reward",
+        "r_qual",
+        "r_global",
+        "r_safe",
+        "r_time",
+        "terminal_bonus",
+        "terminal_penalty",
+        "policy_loss",
+        "value_loss",
+        "entropy",
+        "inner_ticks",
+        "replanned_ratio",
+        "decision_step",
+    ]
+    episode_metrics = [
+        "episode_return",
+        "episode_steps",
+        "episode_policy_loss",
+        "episode_value_loss",
+        "episode_entropy",
+        "episode_asset_breach_count",
+    ]
+
+    # Define metrics for each scheme (namespacing by scheme_name when logging)
+    for scheme in schemes:
+        prefix = f"{scheme}/"
+        for m in step_metrics:
+            name = prefix + m
+            try:
+                wandb.define_metric(name, step_metric="global_step")
+            except Exception:
+                try:
+                    run.define_metric(name, step_metric="global_step")
+                except Exception:
+                    pass
+        for m in episode_metrics:
+            name = prefix + m
+            try:
+                wandb.define_metric(name, step_metric="episode")
+            except Exception:
+                try:
+                    run.define_metric(name, step_metric="episode")
+                except Exception:
+                    pass
+
+    # Also define top-level eval and global metrics
+    try:
+        wandb.define_metric("global_step")
+        wandb.define_metric("episode")
+        for m in ["eval_return", "eval_steps", "best_eval_return"]:
+            wandb.define_metric(m, step_metric="episode")
+    except Exception:
+        pass
+
     return run
 
 
@@ -225,6 +292,7 @@ def _run_eval_episode(
     trace_rewards = []
     trace_captured = []
     trace_inner_ticks = []
+    trace_frames = []
 
     with torch.no_grad():
         while (not done) and (not trunc):
@@ -247,13 +315,21 @@ def _run_eval_episode(
 
             obs_np = next_obs_np
 
+            # collect a render frame if available
+            try:
+                frame = env.render()
+            except Exception:
+                frame = None
+            if frame is not None:
+                trace_frames.append(frame)
+
     trace = {
         "actions": np.stack(trace_actions, axis=0) if len(trace_actions) > 0 else np.empty((0,), dtype=np.int64),
         "rewards": np.stack(trace_rewards, axis=0) if len(trace_rewards) > 0 else np.empty((0,), dtype=np.float32),
         "captured_total": np.stack(trace_captured, axis=0) if len(trace_captured) > 0 else np.empty((0,), dtype=np.int64),
         "inner_ticks": np.stack(trace_inner_ticks, axis=0) if len(trace_inner_ticks) > 0 else np.empty((0,), dtype=np.int64),
     }
-    return ep_return, ep_steps, trace
+    return ep_return, ep_steps, trace, trace_frames
 
 
 def train_online(cfg: TrainConfig):
@@ -331,7 +407,8 @@ def train_online(cfg: TrainConfig):
         envs[scheme_name] = TODCMARLEnv(
             {
                 "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
-                "render_mode": "none",
+                # enable in-env rendering during training only if user requested step-frame capture
+                "render_mode": "rgb_array" if cfg.step_frame_interval and cfg.step_frame_interval > 0 else "none",
                 "max_episode_steps": cfg.max_episode_steps,
                 "time_res": cfg.time_res,
                 "step_mode": cfg.step_mode,
@@ -377,28 +454,27 @@ def train_online(cfg: TrainConfig):
                 logp = dist.log_prob(actions)  # [P]
                 entropy = dist.entropy().mean()
 
-                # --- 统计奖励分项 ---
-                # 1. step reward 分项
-                rewards, reward_details = env.reward_fn.compute_step_rewards(
-                    actions=actions.detach().cpu().numpy(),
-                    obs=obs_np,
-                    curr_min_dist=env._pairwise_dist().min(axis=1),
-                    last_min_dist=env.last_min_dist,
-                    num_p=env.num_P,
-                    return_details=True,
-                )
-                env.last_min_dist = env._pairwise_dist().min(axis=1)
-                # 2. 终局奖励分项
-                asset_breached = env._check_asset_breach()
-                env.reward_fn.apply_terminal_rewards(
-                    rewards,
-                    captured_delta=int(np.sum(~env.Capflag & env._check_collision())),
-                    num_e=env.num_E,
-                    asset_breached=asset_breached,
-                    details=reward_details,
-                )
-                reward_vec = np.array([rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
+                # Advance environment and use its canonical rewards/details (do not recompute)
+                next_obs_np, env_rewards, terms, truncs, infos = env.step(actions.detach().cpu().numpy())
+                reward_vec = np.array([env_rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
                 reward_t = _to_tensor(reward_vec, device)
+                # Obtain reward breakdown for logging from env infos if available
+                try:
+                    reward_details = infos.get("_reward_details_all")
+                except Exception:
+                    reward_details = None
+                if reward_details is None:
+                    reward_details = {
+                        f"p_{i}": {
+                            "r_qual": float(env_rewards[f"p_{i}"]),
+                            "r_global": 0.0,
+                            "r_safe": 0.0,
+                            "r_time": 0.0,
+                        }
+                        for i in range(env.num_P)
+                    }
+                    reward_details["terminal_bonus"] = 0.0
+                    reward_details["terminal_penalty"] = 0.0
 
                 done = bool(terms["__all__"])
                 trunc = bool(truncs["__all__"])
@@ -457,6 +533,21 @@ def train_online(cfg: TrainConfig):
                         }
                     )
 
+                # Step-level visual: upload a frame every cfg.step_frame_interval steps
+                if run is not None and cfg.step_frame_interval and cfg.step_frame_interval > 0 and (
+                    global_step % cfg.step_frame_interval == 0
+                ):
+                    try:
+                        frame = env.render()
+                    except Exception:
+                        frame = None
+                    if frame is not None:
+                        try:
+                            run.log({f"{scheme_name}/step_image": wandb.Image(frame, caption=f"step {global_step}"), "global_step": global_step})
+                        except Exception:
+                            # best-effort: don't crash training on logging issues
+                            pass
+
                 obs_np = next_obs_np
 
             # 统计本episode资产受损次数
@@ -489,7 +580,7 @@ def train_online(cfg: TrainConfig):
                 eval_env = TODCMARLEnv(
                     {
                         "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
-                        "render_mode": "none",
+                        "render_mode": "rgb_array",
                         "max_episode_steps": cfg.max_episode_steps,
                         "time_res": cfg.time_res,
                         "step_mode": cfg.step_mode,
@@ -502,11 +593,13 @@ def train_online(cfg: TrainConfig):
                 eval_returns = []
                 eval_steps = []
                 last_trace = None
+                last_frames = None
                 for _ in range(max(1, cfg.eval_episodes)):
-                    ret, stp, trace = _run_eval_episode(model, eval_env, device)
+                    ret, stp, trace, frames = _run_eval_episode(model, eval_env, device)
                     eval_returns.append(ret)
                     eval_steps.append(stp)
                     last_trace = trace
+                    last_frames = frames
 
                 mean_eval_return = float(np.mean(eval_returns))
                 mean_eval_steps = float(np.mean(eval_steps))
@@ -522,6 +615,30 @@ def train_online(cfg: TrainConfig):
                     os.makedirs(scheme_dir, exist_ok=True)
                     trace_path = os.path.join(scheme_dir, f"episode_{ep:05d}.npz")
                     np.savez_compressed(trace_path, **last_trace)
+
+                # Upload eval video to wandb (best-effort)
+                if run is not None and last_frames is not None and len(last_frames) > 0:
+                    try:
+                        # write frames to a temporary mp4 file
+                        tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                        tmpf.close()
+                        with imageio.get_writer(tmpf.name, fps=cfg.eval_video_fps, codec="libx264") as writer:
+                            for fr in last_frames:
+                                # ensure uint8
+                                fr_u8 = (fr.astype(np.uint8) if fr.dtype != np.uint8 else fr)
+                                writer.append_data(fr_u8)
+
+                        try:
+                            run.log({f"{scheme_name}/eval_video": wandb.Video(tmpf.name, fps=cfg.eval_video_fps, format="mp4"), "episode": ep})
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(tmpf.name)
+                        except Exception:
+                            pass
+                    except Exception:
+                        # ignore video generation errors
+                        pass
 
                 if run is not None:
                     run.log(
@@ -556,10 +673,7 @@ def train_online(cfg: TrainConfig):
 
 def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Online MARL trainer with optional Weights & Biases logging")
-    if defaults:
-        parser.set_defaults(**defaults)
-
-    parser.add_argument("--config", type=str, default="./configs/train_online0324.yaml", help="Path to JSON/YAML config")
+    parser.add_argument("--config", type=str, default="configs/train_online0324.yaml", help="Path to JSON/YAML config")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--max-episode-steps", type=int, default=200)
     parser.add_argument("--gamma", type=float, default=0.99)
@@ -593,14 +707,24 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--save-best", type=_str2bool, default=True)
     parser.add_argument("--save-replay", type=_str2bool, default=True)
     parser.add_argument("--replay-dir", type=str, default="output/eval_traces")
+    parser.add_argument("--step-frame-interval", type=int, default=1, help="Upload a training step image every N global steps (0 to disable)")
+    parser.add_argument("--eval-video-fps", type=int, default=10, help="FPS for eval video uploaded to wandb")
+
+    # Apply file/config defaults after all arguments are declared so they override add_argument's built-in defaults
+    if defaults:
+        parser.set_defaults(**defaults)
 
     return parser
 
 
 def _parse_args() -> TrainConfig:
+    # Debug: print raw argv to help diagnose config passing issues
+    # print("[DEBUG] sys.argv:", sys.argv)
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--config", type=str, default=None)
     pre_args, _ = pre_parser.parse_known_args()
+
+    # print("[DEBUG] pre_args.config:", pre_args.config)
 
     cfg_defaults = dict(TrainConfig().__dict__)
     if pre_args.config:
@@ -608,10 +732,27 @@ def _parse_args() -> TrainConfig:
         for k, v in file_cfg.items():
             if k in cfg_defaults:
                 cfg_defaults[k] = v
+    else:
+        file_cfg = None
+
+    # print("[DEBUG] cfg_defaults keys from file:", list(file_cfg.keys()) if file_cfg is not None else None)
 
     parser = _build_parser(defaults=cfg_defaults)
 
+    # Debug: show the defaults applied to the parser (from YAML)
+    # try:
+    #     print("[DEBUG] cfg_defaults applied to parser:", {k: cfg_defaults.get(k) for k in sorted(cfg_defaults.keys())})
+    # except Exception:
+    #     pass
+
     args = parser.parse_args()
+
+    # Debug: print some parsed args to verify values came from YAML
+    # try:
+    #     print("[DEBUG] parsed args: device=", args.device, "gpu_ids=", args.gpu_ids, "episodes=", args.episodes)
+    #     print("[DEBUG] parsed args reward:", getattr(args, "reward", None))
+    # except Exception:
+    #     pass
 
     reward_cfg = getattr(args, "reward", None)
     if args.reward_json:
@@ -651,6 +792,8 @@ def _parse_args() -> TrainConfig:
         save_best=bool(args.save_best),
         save_replay=bool(args.save_replay),
         replay_dir=args.replay_dir,
+        step_frame_interval=args.step_frame_interval,
+        eval_video_fps=args.eval_video_fps,
     )
 
 

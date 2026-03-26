@@ -44,6 +44,34 @@
 
 ### 3.1 两种运行模式
 
+## 如何在 W&B 网页实时查看奖励变化
+
+- 前提：在配置文件中启用 W&B（`wandb_mode: online`），并设置 `wandb_project`、`wandb_entity`（可选）和 `wandb_run_name`（可选）。推荐以包方式运行训练：
+
+```bash
+python -m marl.train_online --config configs/train_online0324.yaml
+```
+
+- 启动后：控制台会输出当前 Run 的链接，或在浏览器打开：
+	`https://wandb.ai/<entity>/<project>`（例如 `https://wandb.ai/your-username/dubins-marl-online`）。
+
+- 面板操作速查：
+	- 选择某个 Run → 进入 `Charts` / `Metrics` 页面。
+	- 在 metrics 列表中勾选我们在训练中上报的指标：`r_qual`、`r_global`、`r_safe`、`r_time`、`terminal_bonus`、`terminal_penalty`、`step_reward`、`episode_return`。
+	- 使用 smoothing、scale、并把 x 轴切换为 `global_step` 或 `episode` 以匹配实验节奏。
+	- 勾选多个 Runs 后点击 `Compare`，进行跨试验对比（例如不同 reward 超参对比）。
+
+- 进阶：
+	- 在 Charts 页面创建并保存自定义 Dashboard（把常用分项放一起，便于长期观察）。
+	- 若希望记录模型/梯度，代码中可以调用 `wandb.watch(model)`（需自行添加）。
+	- 网络受限时，可用 `WANDB_MODE=offline` 记录本地，之后用 `wandb sync` 同步。
+
+- 常见问题：
+	- 看不到日志：确认 `wandb login` 已完成并且 `wandb_mode` 非 `disabled`。
+	- Run 名不明确：在 YAML 中填 `wandb_run_name` 或运行时设置 `name`。
+
+这个仓库已在训练脚本中按 step/episode 级别上报奖励分项，按上述步骤即可在 W&B 面板实时查看并对比它们的变化。
+
 1. real_mode
 : 从 map 目录加载真实资产（Map、IsoMap、PathE2Val_true 等），进行真实重规划。
 

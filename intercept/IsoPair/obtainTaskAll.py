@@ -115,7 +115,8 @@ def obtainCost(flattened_pairs, pathidP, CapRef, Pid_ref_flat):
             param_D * cost_D)
 
     # 结果拼接
-    costAll = np.column_stack((Delta_t, Delta_d, Delta_v, Delta_L,Delta_D ))
+    costAll = np.column_stack((Delta_t, Delta_d, Delta_v, Delta_L,Delta_D,
+                                cost_t, cost_d, cost_v, cost_L, cost_D))
 
     return cost, costAll
 
@@ -289,7 +290,9 @@ def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, Is
     # 11-12: Eid, Pid (原始ID)/[0 1]而不是[0 2]
     # 13: Eiso (pathidE[:, 2])
     # 14: Piso (pathidP[:, 2])
-    # 15-17: costAll (如果是向量/矩阵，拼接全量)
+    # //15-17: costAll (如果是向量/矩阵，拼接全量)
+    # 15-19:(Delta_t, Delta_d, Delta_v, Delta_L,Delta_D,
+    # 20-24:cost_t, cost_d, cost_v, cost_L, cost_D))
     
     InterceptCandidates = np.column_stack((
         flattened_pairs[:,:7],          # 0-6 (te, tp, ETPid, PTPid, idxE, idxP, dist)

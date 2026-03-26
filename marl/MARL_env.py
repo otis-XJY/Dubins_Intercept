@@ -36,7 +36,8 @@ class StepStats:
     replanned: bool = False
     collision: bool = False
     captured: int = 0
-    inner_ticks: int = 0
+    inner_ticks: int = 1
+    inner_ticks_old: int = 0
     forced_decision: bool = False
 
 
@@ -81,6 +82,14 @@ class TODCMARLEnv(gym.Env):
         self._profile_cursor = -1
         self.current_profile = None
         self.decision_step = 0
+        self._episode_terminal_pending = False
+        # Cached geometry from last _compute_isomap_intercept_candidates (for path stitching)
+        self._path_e2tp_cache = None
+        self._path_p2tp_cache = None
+        self._e2tp_tp_idx_cache = None
+        self._p2tp_tp_idx_cache = None
+        self._pairs_e2val_cache = None
+        self._ic_best_per_pair = None
 
     @staticmethod
     def _normalize_max_inner_ticks(value) -> int:
@@ -117,6 +126,7 @@ class TODCMARLEnv(gym.Env):
                 "self_uav": spaces.Box(-np.inf, np.inf, shape=(self.num_P, 1, 3), dtype=np.float32),
                 "ally_uavs": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_slots, 3), dtype=np.float32),
                 "self_pts": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.k_max, 8), dtype=np.float32),
+                "reward_nodes": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.k_max, 8), dtype=np.float32),
                 "ally_pts": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_pts_slots, 8), dtype=np.float32),
                 "enemies": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.num_E, 3), dtype=np.float32),
                 "targets": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.num_E, 2), dtype=np.float32),
@@ -415,14 +425,24 @@ class TODCMARLEnv(gym.Env):
         self.UnCapPidNew = self.UnCapPid.copy()
         self.UnCapEidNew = self.UnCapEid.copy()
 
-        self.IC = np.empty((0, 18), dtype=float)
+        # self.IC = np.empty((0, 18), dtype=float)
         self.IC_candidates = np.empty((0, 18), dtype=float)
         self.ICFinal = np.empty((0, 18), dtype=float)
+        self._path_e2tp_cache = None
+        self._ic_best_per_pair = None
 
+        # main0319: inner time loop until DWA triggers replan (line 264), then build candidates
         if self.real_mode:
-            self._try_replan()
+            hit_decision, terminal_before_agent = self._rollout_until_dwa_decision()
+            if hit_decision:
+                if not self._compute_isomap_intercept_candidates():
+                    self._try_replan()
+            else:
+                self._dummy_candidates()
+            self._episode_terminal_pending = bool(terminal_before_agent and not hit_decision)
         else:
             self._dummy_candidates()
+            self._episode_terminal_pending = False
 
         self.last_min_dist = self._pairwise_dist().min(axis=1)
         obs = self._build_obs()
@@ -450,94 +470,140 @@ class TODCMARLEnv(gym.Env):
         self.last_action_weights = actions
         self.last_action_indices = np.argmax(actions, axis=1).astype(np.int64)
 
-        stats = StepStats(replanned=False, collision=False, captured=0)
+        stats = StepStats(replanned=False, collision=False, captured=0, inner_ticks_old=0)
 
-        def should_replan_now() -> bool:
-            if not (self.real_mode and self.enable_dwa_replan):
-                return False
-            try:
-                path_e_pre = [self.PathE[eid] for eid in range(self.num_E)]
-                min_dists, _ = obtainDWAprePath(self.PosE, path_e_pre, self.E_PreRef)
-                return not np.all(min_dists <= 10)
-            except Exception:
-                return False
-
-        def update_capture_and_collision() -> bool:
-            collision_now = self._check_collision()
-            stats.collision = bool(collision_now)
-
-            distances_now = self._pairwise_dist()
-            assignments_now = np.argmin(distances_now, axis=0)
-            p_for_e_now = self.PosP[assignments_now]
-            e_now = self.PosE
-
-            dx_now = e_now[:, 0] - p_for_e_now[:, 0]
-            dy_now = e_now[:, 1] - p_for_e_now[:, 1]
-            ang_pe_now = np.degrees(np.arctan2(dy_now, dx_now))
-            angle_diff_now = (ang_pe_now - np.degrees(p_for_e_now[:, 2]) + 180.0) % 360.0 - 180.0
-
-            cap_dist = self.CapRef["CapDist"]
-            cap_angle_half = self.CapRef["CapAngle"] / 2.0
-            prev_cap = self.Capflag.copy()
-            self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
-            stats.captured += int(np.sum(~prev_cap & self.Capflag))
-            return bool(np.all(self.Capflag) or collision_now)
+        if self._episode_terminal_pending:
+            self._episode_terminal_pending = False
+            rewards, reward_details = self._compute_rewards(actions, inner_ticks_delta=0)
+            asset_breached = self._check_asset_breach()
+            self.reward_fn.apply_terminal_rewards(
+                rewards,
+                captured_delta=0,
+                num_e=self.num_E,
+                asset_breached=asset_breached,
+                details=reward_details,
+            )
+            done_all = True
+            truncated_all = False
+            obs = self._build_obs()
+            self._sync_dynamic_k(obs)
+            terminations = {f"p_{i}": True for i in range(self.num_P)}
+            truncations = {f"p_{i}": False for i in range(self.num_P)}
+            terminations["__all__"] = True
+            truncations["__all__"] = False
+            infos: Dict = {}
+            for i in range(self.num_P):
+                infos[f"p_{i}"] = {
+                    "replanned": False,
+                    "collision": False,
+                    "captured_total": int(np.sum(self.Capflag)),
+                    "asset_breached": bool(asset_breached),
+                    "num_candidates": int(self.IC_candidates.shape[0]),
+                    "inner_ticks": 0,
+                    "forced_decision": False,
+                    "decision_step": int(self.decision_step),
+                    "step_mode": self.step_mode,
+                    "max_inner_ticks": int(self.max_inner_ticks),
+                }
+            infos["_reward_details_all"] = reward_details
+            return obs, rewards, terminations, truncations, infos
 
         decision_mode = self.step_mode == "decision"
         inner_limit = max(1, self.max_inner_ticks)
+        prev_cap = self.Capflag.copy()
 
         if decision_mode:
-            for _ in range(inner_limit):
-                self.t += self.time_res / self.Stepsize
-                self.t_all += self.time_res / self.Stepsize
+            # One RL step: apply assignment at current DWA decision, then advance time (main0319:205–206)
+            # until next `not flagIn` (line 264) or episode end.
+            if self.real_mode:
+                self._apply_assignment_from_action(actions)
+
+            stats.inner_ticks = 0
+            inner = 0
+            while inner < inner_limit:
+                need_replan, terminal = self._single_inner_simulation_tick(actions)
                 stats.inner_ticks += 1
-
-                if should_replan_now():
-                    self._try_replan()
+                inner += 1
+                if terminal:
+                    stats.collision = bool(self._check_collision())
+                    break
+                if need_replan:
                     stats.replanned = True
-                    self.decision_step += 1
-
-                if self.real_mode:
-                    self._advance_from_paths()
-                else:
-                    self._advance_dummy(actions)
-
-                done_inner = update_capture_and_collision()
-                if stats.replanned or done_inner:
                     break
 
-            if (not stats.replanned) and (not np.all(self.Capflag)) and (not stats.collision):
+            if inner >= inner_limit and not terminal:
                 stats.forced_decision = True
+                if self.real_mode and not stats.replanned:
+                    stats.replanned = True
 
+            if stats.replanned and not terminal and self.real_mode:
+                self._compute_isomap_intercept_candidates()
+            elif stats.replanned and not terminal and not self.real_mode:
+                self._dummy_candidates()
+
+            stats.captured = int(np.sum(~prev_cap & self.Capflag))
+            self.decision_step += 1
             self.episode_step += 1
         else:
+            # time mode: one physics tick per RL step; advance then DWA (main0319 order)
             self.t += self.time_res / self.Stepsize
             self.t_all += self.time_res / self.Stepsize
             stats.inner_ticks = 1
 
-            if should_replan_now():
-                self._try_replan()
-                stats.replanned = True
-                self.decision_step += 1
+            if self.pairs_realE2P is not None and self.pairs_realE2P.shape[0] == self.Capflag.shape[0]:
+                self.UnCapPidNew = self.pairs_realE2P[~self.Capflag, 1].astype(int)
+                self.UnCapEidNew = self.pairs_realE2P[~self.Capflag, 0].astype(int)
+                self.pairs_realE2P = self.pairs_realE2P[~self.Capflag]
 
             if self.real_mode:
                 self._advance_from_paths()
             else:
                 self._advance_dummy(actions)
 
-            update_capture_and_collision()
+            if self.real_mode and self.enable_dwa_replan:
+                try:
+                    pos_e, path_pre = self._dwa_pos_e_and_path_pre()
+                    min_dists, _ = obtainDWAprePath(pos_e, path_pre, self.E_PreRef)
+                    if not np.all(min_dists <= 10):
+                        self._try_replan()
+                        stats.replanned = True
+                        self.decision_step += 1
+                except Exception:
+                    self._try_replan()
+                    stats.replanned = True
+                    self.decision_step += 1
+
+            distances_now = self._pairwise_dist()
+            assignments_now = np.argmin(distances_now, axis=0)
+            p_for_e_now = self.PosP[assignments_now]
+            e_now = self.PosE
+            dx_now = e_now[:, 0] - p_for_e_now[:, 0]
+            dy_now = e_now[:, 1] - p_for_e_now[:, 1]
+            ang_pe_now = np.degrees(np.arctan2(dy_now, dx_now))
+            angle_diff_now = (ang_pe_now - np.degrees(p_for_e_now[:, 2]) + 180.0) % 360.0 - 180.0
+            cap_dist = self.CapRef["CapDist"]
+            cap_angle_half = self.CapRef["CapAngle"] / 2.0
+            prev_cap_t = self.Capflag.copy()
+            self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
+            stats.captured = int(np.sum(~prev_cap_t & self.Capflag))
+            stats.collision = bool(self._check_collision())
             self.episode_step += 1
 
-        rewards = self._compute_rewards(actions)
+        rewards, reward_details = self._compute_rewards(actions, inner_ticks_delta=stats.inner_ticks - stats.inner_ticks_old)
         asset_breached = self._check_asset_breach()
         self.reward_fn.apply_terminal_rewards(
             rewards,
             captured_delta=stats.captured,
             num_e=self.num_E,
             asset_breached=asset_breached,
+            details=reward_details,
         )
 
-        done_all = bool(np.all(self.Capflag) or stats.collision or asset_breached)
+        max_t = float(self.length_E_max) / float(self.v_E)
+        time_exceeded = self.t_all >= max_t - 1e-9
+        done_all = bool(
+            np.all(self.Capflag) or stats.collision or asset_breached or time_exceeded
+        )
         truncated_all = bool(self.episode_step >= self.max_episode_steps)
 
         obs = self._build_obs()
@@ -547,8 +613,9 @@ class TODCMARLEnv(gym.Env):
         terminations["__all__"] = done_all
         truncations["__all__"] = truncated_all
 
-        infos = {
-            f"p_{i}": {
+        infos = {}
+        for i in range(self.num_P):
+            entry = {
                 "replanned": stats.replanned,
                 "collision": stats.collision,
                 "captured_total": int(np.sum(self.Capflag)),
@@ -560,8 +627,18 @@ class TODCMARLEnv(gym.Env):
                 "step_mode": self.step_mode,
                 "max_inner_ticks": int(self.max_inner_ticks),
             }
-            for i in range(self.num_P)
-        }
+            # attach per-agent reward breakdown if available
+            try:
+                if reward_details is not None and f"p_{i}" in reward_details:
+                    entry["reward_details"] = reward_details[f"p_{i}"]
+            except Exception:
+                pass
+            infos[f"p_{i}"] = entry
+        # expose full reward breakdown mapping for external use (logging, analysis)
+        try:
+            infos["_reward_details_all"] = reward_details
+        except Exception:
+            infos["_reward_details_all"] = None
         return obs, rewards, terminations, truncations, infos
 
     def _advance_from_paths(self):
@@ -638,6 +715,13 @@ class TODCMARLEnv(gym.Env):
             self._dummy_candidates()
 
     def _replan_with_isomap(self):
+        """Full replan: build candidates + Hungarian assignment + paths (legacy / smoke tests)."""
+        if not self._compute_isomap_intercept_candidates():
+            return
+        self._apply_hungarian_and_paths()
+
+    def _compute_isomap_intercept_candidates(self) -> bool:
+        """Build iso maps and intercept table; cache geometry for _apply_paths_from_assigned_rows. Returns False on fallback."""
         traj = [self.PathE2Val_true[i][: max(2, int(self.t_all * self.v_E)), :] for i in range(self.num_E)]
         targets = self.ValuePos[:, :2]
         res = predictLikelyTargetNew(traj, targets)
@@ -726,30 +810,39 @@ class TODCMARLEnv(gym.Env):
                 results.append([te, tp, e2tp_tp_idx[ide], p2tp_tp_idx[idp], pair_mat, eid, pid, ide, idp])
 
         if len(results) == 0:
+            print("no IsoPairs")
             self._dummy_candidates()
-            return
+            self._path_e2tp_cache = None
+            return False
 
         iso_pairs = np.array(results, dtype=object)
         iso_pairs = iso_pairs[np.argsort(iso_pairs[:, 0].astype(int))]
 
         intercept = obtainTask_timeShift2(iso_pairs, self.IsoMap_i_tt_P2Iso, self.IsoMap_i_tt_E2Iso, self.CapRef)
-        self.IC = intercept.copy()
+        self.IC_candidates = intercept.copy()
 
         unique_pairs = np.unique(intercept[:, [11, 12]], axis=0)
-        best = []
+        best_candidates_list = []
         for pair in unique_pairs:
             eid_val, pid_val = pair
             group = intercept[(intercept[:, 11] == eid_val) & (intercept[:, 12] == pid_val)]
-            group = group[np.argsort(group[:, 8])]
-            n1 = max(1, int(np.ceil(len(group) * 0.5)))
-            group = group[:n1]
-            group = group[np.argsort(group[:, 15])[::-1]]
-            n2 = max(1, int(np.ceil(len(group) * 0.5)))
-            group = group[:n2]
-            best_idx = np.argmax(group[:, 16])
-            best.append(group[best_idx])
-        ic_candidates = np.array(best)
-        self.IC_candidates = ic_candidates
+            sort_idx = np.lexsort((group[:, 16], group[:, 8], -group[:, 15]))
+            best_candidates_list.append(group[sort_idx[0]])
+        ic_candidates = np.array(best_candidates_list)
+        self._ic_best_per_pair = ic_candidates
+
+        self._path_e2tp_cache = path_e2tp
+        self._path_p2tp_cache = path_p2tp
+        self._e2tp_tp_idx_cache = e2tp_tp_idx
+        self._p2tp_tp_idx_cache = p2tp_tp_idx
+        self._pairs_e2val_cache = pairs_e2val
+        return True
+
+    def _apply_hungarian_and_paths(self):
+        ic_candidates = self._ic_best_per_pair
+        if ic_candidates is None or ic_candidates.size == 0:
+            self._dummy_candidates()
+            return
 
         e_set, e_inv = np.unique(ic_candidates[:, 11], return_inverse=True)
         p_set, p_inv = np.unique(ic_candidates[:, 12], return_inverse=True)
@@ -762,6 +855,13 @@ class TODCMARLEnv(gym.Env):
         final_rows = idx_mat[p_idx[valid_mask], e_idx[valid_mask]]
         assigned = ic_candidates[final_rows]
         self.ICFinal = assigned.copy()
+        self._apply_paths_from_assigned_rows(assigned)
+
+    def _apply_paths_from_assigned_rows(self, assigned: np.ndarray):
+        path_e2tp = self._path_e2tp_cache
+        path_p2tp = self._path_p2tp_cache
+        if path_e2tp is None or path_p2tp is None or assigned.size == 0:
+            return
 
         e_idx = assigned[:, 11].astype(int)
         vp_idx = assigned[:, 9].astype(int)
@@ -806,6 +906,128 @@ class TODCMARLEnv(gym.Env):
         self.pairs_realE2P = np.column_stack((assigned[:, 11].astype(int), assigned[:, 12].astype(int)))
         self.t = 0.0
 
+    def _dwa_pos_e_and_path_pre(self):
+        """Match main0319: DWA uses uncaptured pairs when pairs_realE2P is aligned with Capflag."""
+        if self.pairs_realE2P is None:
+            return self.PosE, [self.PathE[eid] for eid in range(self.num_E)]
+        if self.pairs_realE2P.shape[0] != self.Capflag.shape[0]:
+            return self.PosE, [self.PathE[eid] for eid in range(self.num_E)]
+        if len(self.UnCapEidNew) == 0:
+            return self.PosE, [self.PathE[eid] for eid in range(self.num_E)]
+        pos_e = np.array([self.PosE[int(eid)] for eid in self.UnCapEidNew])
+        path_pre = []
+        for eid in self.UnCapEidNew:
+            slot = np.where(self.UnCapEid == eid)[0][0]
+            path_pre.append(self.PathE[slot])
+        return pos_e, path_pre
+
+    def _update_capflag_from_geometry(self) -> int:
+        """Update Capflag; return number of new captures this tick."""
+        distances_now = self._pairwise_dist()
+        assignments_now = np.argmin(distances_now, axis=0)
+        p_for_e_now = self.PosP[assignments_now]
+        e_now = self.PosE
+        dx_now = e_now[:, 0] - p_for_e_now[:, 0]
+        dy_now = e_now[:, 1] - p_for_e_now[:, 1]
+        ang_pe_now = np.degrees(np.arctan2(dy_now, dx_now))
+        angle_diff_now = (ang_pe_now - np.degrees(p_for_e_now[:, 2]) + 180.0) % 360.0 - 180.0
+        cap_dist = self.CapRef["CapDist"]
+        cap_angle_half = self.CapRef["CapAngle"] / 2.0
+        prev_cap = self.Capflag.copy()
+        self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
+        return int(np.sum(~prev_cap & self.Capflag))
+
+    def _single_inner_simulation_tick(self, dummy_actions: Optional[np.ndarray] = None) -> Tuple[bool, bool]:
+        """
+        One main0319-style tick: advance time, sync pairs, advance geometry, then DWA (line 258–264).
+        Returns (need_replan, episode_terminal). need_replan corresponds to `if not flagIn` (replan branch).
+        """
+        max_t = float(self.length_E_max) / float(self.v_E)
+        if self.t_all >= max_t - 1e-9:
+            return False, True
+
+        dt = self.time_res / self.Stepsize
+        self.t += dt
+        self.t_all += dt
+
+        if self.pairs_realE2P is not None and self.pairs_realE2P.shape[0] == self.Capflag.shape[0]:
+            self.UnCapPidNew = self.pairs_realE2P[~self.Capflag, 1].astype(int)
+            self.UnCapEidNew = self.pairs_realE2P[~self.Capflag, 0].astype(int)
+            self.pairs_realE2P = self.pairs_realE2P[~self.Capflag]
+
+        if self.real_mode:
+            self._advance_from_paths()
+        else:
+            if dummy_actions is None:
+                dummy_actions = self.last_action_weights
+            self._advance_dummy(dummy_actions)
+
+        if self._check_collision():
+            return False, True
+        if self._check_asset_breach():
+            return False, True
+
+        self._update_capflag_from_geometry()
+        if self.num_E > 0 and np.all(self.Capflag):
+            return False, True
+
+        need_replan = False
+        if self.real_mode and self.enable_dwa_replan:
+            try:
+                pos_e, path_pre = self._dwa_pos_e_and_path_pre()
+                min_dists, _ = obtainDWAprePath(pos_e, path_pre, self.E_PreRef)
+                need_replan = not bool(np.all(min_dists <= 10))
+            except Exception:
+                need_replan = True
+        return need_replan, False
+
+    def _rollout_until_dwa_decision(self) -> Tuple[bool, bool]:
+        """
+        Run inner loop (main0319:202) until DWA requests replan or episode ends.
+        Returns (reached_decision_point, terminal).
+        """
+        if not self.real_mode:
+            return True, False
+        inner = 0
+        while True:
+            need_replan, terminal = self._single_inner_simulation_tick(None)
+            inner += 1
+            if terminal:
+                return False, True
+            if need_replan:
+                return True, False
+            if inner >= self.max_inner_ticks:
+                return True, True
+
+    def _apply_assignment_from_action(self, actions: np.ndarray) -> None:
+        """Apply RL-chosen candidate rows instead of Hungarian (requires valid isomap cache)."""
+        if not self.real_mode or self._path_e2tp_cache is None:
+            return
+        try:
+            obs = self._build_obs()
+            self._sync_dynamic_k(obs)
+            mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
+            assigned_rows = []
+            for pid in range(self.num_P):
+                subset = self.IC_candidates[self.IC_candidates[:, 12].astype(int) == pid]
+                if subset.shape[0] == 0:
+                    self._apply_hungarian_and_paths()
+                    return
+                n = int(subset.shape[0])
+                k_use = min(n, mask.shape[1])
+                idx = int(np.argmax(actions[pid, :k_use]))
+                if idx >= n:
+                    idx = n - 1
+                if mask[pid, idx] <= 0:
+                    valid = np.where(mask[pid, :n] > 0)[0]
+                    idx = int(valid[0]) if valid.size > 0 else 0
+                assigned_rows.append(subset[idx])
+            assigned = np.vstack(assigned_rows)
+            self.ICFinal = assigned.copy()
+            self._apply_paths_from_assigned_rows(assigned)
+        except Exception:
+            self._apply_hungarian_and_paths()
+
     def _dummy_candidates(self):
         rows = []
         for pid in range(self.num_P):
@@ -837,36 +1059,47 @@ class TODCMARLEnv(gym.Env):
                     ]
                 )
         arr = np.array(rows, dtype=float)
-        self.IC = arr[:, :18]
-        self.IC_candidates = self.IC.copy()
-        self.ICFinal = self.IC.copy()
+        IC = arr[:, :18]
+        self.IC_candidates = IC.copy()
+        self.ICFinal = IC.copy()
 
     def _pairwise_dist(self):
         pp = self.PosP[:, :2]
         ee = self.PosE[:, :2]
         return np.linalg.norm(pp[:, None, :] - ee[None, :, :], axis=2)
 
-    def _extract_candidate_pos(self, row: np.ndarray, pid: int) -> Tuple[float, float]:
-        if row.shape[0] >= 20:
-            return float(row[18]), float(row[19])
+    def _extract_candidate_pos(self, row: np.ndarray, pid: int) -> Tuple[float, float, float]:
 
+        # 尝试使用 IsoMap 中的 IsoPos（与 _extract_iso_points 行为一致）
         if self.real_mode and hasattr(self, "IsoMap_i_tt_P2Iso") and row.shape[0] > 6:
             try:
-                t_p = int(row[1])
-                idx_p = int(row[5])
-                pid_ref = int(row[12]) if row.shape[0] > 12 else pid
-                iso_obj = self.IsoMap_i_tt_P2Iso[pid_ref][t_p]
+                # 常见布局（见 obtainRLOutput）: te=0, tp=1, IsoIdxE=4, IsoIdxP=5, eid=11, pid=12
+                tp_idx = int(row[1]) if row.shape[0] > 1 else 0
+                iso_idx = int(row[5]) if row.shape[0] > 5 else (int(row[4]) if row.shape[0] > 4 else 0)
+
+                cols = getattr(self.obs_generator, "cols", None)
+                if cols is not None:
+                    pid_ref = int(row[cols.pid_ref]) if row.shape[0] > cols.pid_ref else pid
+                else:
+                    pid_ref = int(row[12]) if row.shape[0] > 12 else pid
+
+                iso_obj = self.IsoMap_i_tt_P2Iso[pid_ref][tp_idx]
                 if iso_obj is not None and hasattr(iso_obj, "IsoPos") and iso_obj.IsoPos is not None:
                     iso_pos = np.asarray(iso_obj.IsoPos)
                     if iso_pos.ndim == 2:
-                        idx_p = max(0, min(idx_p, iso_pos.shape[1] - 1))
-                        return float(iso_pos[0, idx_p]), float(iso_pos[1, idx_p])
+                        iso_idx = max(0, min(iso_idx, iso_pos.shape[1] - 1))
+                        return float(iso_pos[0, iso_idx]), float(iso_pos[1, iso_idx]), float(iso_pos[2, iso_idx])
             except Exception:
                 pass
 
-        eid = int(row[11]) if row.shape[0] > 11 else pid % self.num_E
+        # 回退：使用敌方位置与朝向（兼容老格式 / 无 IsoMap 情况）
+        cols = getattr(self.obs_generator, "cols", None)
+        if cols is not None and row.shape[0] > cols.eid_ref:
+            eid = int(row[cols.eid_ref])
+        else:
+            eid = int(row[11]) if row.shape[0] > 11 else pid % self.num_E
         eid = max(0, min(eid, self.num_E - 1))
-        return float(self.PosE[eid, 0]), float(self.PosE[eid, 1])
+        return float(self.PosE[eid, 0]), float(self.PosE[eid, 1]), float(self.PosE[eid, 2])
 
     def _build_obs(self):
         inferred_targets = np.array([self.ValuePos[i % len(self.ValuePos), :2] for i in range(self.num_E)])
@@ -936,19 +1169,41 @@ class TODCMARLEnv(gym.Env):
             norm[i, sel] = 1.0
         return norm
 
-    def _compute_rewards(self, actions: np.ndarray) -> Dict[str, float]:
+    def _compute_rewards(self, actions: np.ndarray, inner_ticks_delta: int = 1):
         curr_min_dist = self._pairwise_dist().min(axis=1)
         obs = self._build_obs()
-        rewards = self.reward_fn.compute_step_rewards(
-            actions=actions,
-            obs=obs,
-            curr_min_dist=curr_min_dist,
-            last_min_dist=self.last_min_dist,
-            num_p=self.num_P,
-        )
+        # Request detailed breakdown from reward function so env can expose it via infos
+        try:
+            rewards_or_pair = self.reward_fn.compute_step_rewards(
+                actions=actions,
+                obs=obs,
+                curr_min_dist=curr_min_dist,
+                last_min_dist=self.last_min_dist,
+                num_p=self.num_P,
+                inner_ticks_delta=inner_ticks_delta,
+                return_details=True,
+            )
+            # compute_step_rewards may return (rewards, details) when return_details=True
+            if isinstance(rewards_or_pair, tuple) and len(rewards_or_pair) == 2:
+                rewards, details = rewards_or_pair
+            else:
+                rewards = rewards_or_pair
+                details = None
+        except Exception:
+            rewards = self.reward_fn.compute_step_rewards(
+                actions=actions,
+                obs=obs,
+                curr_min_dist=curr_min_dist,
+                last_min_dist=self.last_min_dist,
+                num_p=self.num_P,
+                inner_ticks_delta=inner_ticks_delta,
+            )
+            details = None
 
         self.last_min_dist = curr_min_dist.copy()
-        return rewards
+        # store last reward details for external inspection
+        self._last_reward_details = details
+        return rewards, details
 
     def _check_collision(self) -> bool:
         for p in self.PosP[:, :2]:
