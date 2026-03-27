@@ -4,23 +4,23 @@ import numpy as np
 
 import numpy as np
 
-def obtainCost(flattened_pairs, pathidP, CapRef, Pid_ref_flat):
+def obtainCost(flattened_pairs, pathidP, CapRef, Pid_ref_flat, reward_max=1.0):
     """
     计算代价函数：数值越小表示方案越优。
     计算代价函数：路径长度、空间距离、时间差距、朝向偏差以及安全距离的加权综合。
+    各子 reward 由原始量（Delta_t、Delta_d、Delta_L、|Delta_v|、Delta_D）与阈值直接计算，
+    与对应子代价的语义一致且 reward ∈ [0, reward_max]，避免先算 cost 再反推带来的量化损失。
     
     参数:
     flattened_pairs: NumPy 矩阵，包含 [te, tp, ..., dist, Angle, distE2ValueF]
     pathidP: NumPy 矩阵，包含 [..., ..., path_len]
-    CapDist: 拦截距离阈值下界
-    CapDistTime: 拦截距离阈值上界
-    timeIsoRes: 时间等值间隔
-    v_P: 追捕者速度
+    CapRef: 含 CapDist、CapDistTime、CapAngle、CapAngleTime、v_P、timeIsoRes 等
     Pid_ref_flat: 用于映射原始 Pid 到索引的数组
+    reward_max: 各子 reward 的上界（下界为 0），默认 1.0
     
     返回:
     cost: 综合代价向量 (M,)
-    costAll: 原始特征矩阵 (M, 3)
+    costAll: 特征矩阵 (M, 15)：前 5 列为 Delta_*，中 5 列为各子 cost，后 5 列为对应 reward
     """
     # --- 0. 参数提取与广播 ---
     CapDist = CapRef['CapDist']
@@ -103,9 +103,14 @@ def obtainCost(flattened_pairs, pathidP, CapRef, Pid_ref_flat):
     )
     
     # E. 目标安全代价:
-    # Delta_D 越大（离目标越远拦截），exp(...)越大，分母越大，代价越小。
-    # 符合“越早拦截越好”的原则
-    cost_D = 1.0 / (1.0 + np.exp(0.022 * (Delta_D - 199.99)))
+    # Delta_D <= CapDist：拦截点离目标过近，代价取满 1。
+    # Delta_D > CapDist：代价随距离增大从 1 连续衰减至 0（指数衰减，与 reward 对偶）。
+    k_D = 0.022
+    cost_D = np.where(
+        Delta_D <= CapDist,
+        1.0,
+        np.exp(-k_D * (Delta_D - CapDist)),
+    )
 
     # --- 4. 综合总代价 ---
     cost = (param_L * cost_L + 
@@ -114,9 +119,55 @@ def obtainCost(flattened_pairs, pathidP, CapRef, Pid_ref_flat):
             param_t * cost_t + 
             param_D * cost_D)
 
-    # 结果拼接
-    costAll = np.column_stack((Delta_t, Delta_d, Delta_v, Delta_L,Delta_D,
-                                cost_t, cost_d, cost_v, cost_L, cost_D))
+    # --- 5. 子 reward：由原始量直接计算（与上式各 cost_* 满足 reward = reward_max*(1-cost_*)，但不经过 cost 中间量）---
+    # L：路径越短越好 — reward_L = reward_max * (1 - Delta_L/(max_L+eps))
+    reward_L = reward_max * (max_L - Delta_L) / (max_L + eps)
+
+    # d：Delta_d 在 [CapDist, CapDistTime] 内对 (CapDistTime - Delta_d) 线性；≤CapDist 满分；>CapDistTime 为 0
+    reward_d = np.where(
+        Delta_d <= CapDist,
+        reward_max,
+        np.where(
+            Delta_d <= CapDistTime,
+            reward_max * (CapDistTime - Delta_d) / (CapDistTime - CapDist + eps),
+            0.0,
+        ),
+    )
+
+    # v：角度 — 与 cost_v 分段线性对偶
+    reward_v = np.where(
+        abs_delta_v <= CapAngle,
+        reward_max,
+        np.where(
+            abs_delta_v <= CapAngleTime,
+            reward_max * (CapAngleTime - abs_delta_v) / (CapAngleTime - CapAngle + eps),
+            0.0,
+        ),
+    )
+
+    # t：Delta_t>=0 满分；[-time_threshold,0) 内对 (time_threshold+eps+Delta_t) 线性；再晚为 0
+    reward_t = np.where(
+        Delta_t >= 0,
+        reward_max,
+        np.where(
+            Delta_t >= -time_threshold,
+            reward_max * (time_threshold + eps + Delta_t) / (time_threshold + eps),
+            0.0,
+        ),
+    )
+
+    # D：由 Delta_D、CapDist、k_D 直接计算（与 cost_D 对偶，但不经过 cost_D 以免舍入误差）
+    reward_D = np.where(
+        Delta_D <= CapDist,
+        0.0,
+        reward_max * (1.0 - np.exp(-k_D * (Delta_D - CapDist))),
+    )
+
+    # 结果拼接：Delta → 子 cost → 子 reward（与 cost 列顺序一致：t,d,v,L,D）
+    costAll = np.column_stack((
+        Delta_t, Delta_d, Delta_v, Delta_L, Delta_D,
+        reward_t, reward_d, reward_v, reward_L, reward_D,
+    ))
 
     return cost, costAll
 
@@ -194,7 +245,7 @@ def obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP_i_tt, IsoMapEin_i_tt,CapRef)
     # 11-12: Eid_ref, Pid_ref
     # 13: Eiso (pathidE 第 3 列)
     # 14: Piso (pathidP 第 3 列)
-    # 15: costAll
+    # 15+: costAll（15 列：Delta×5 + 子 cost×5 + 子 reward×5）
     
     InterceptCandidates = np.column_stack((
         flattened_pairs[:, :7],   # te, tp, Eid, Pid, IsoidxE, IsoidxP, dist
@@ -205,7 +256,7 @@ def obtainTask(IsoPairs_time_Eid_Pid_Posid, IsoMapP_i_tt, IsoMapEin_i_tt,CapRef)
         PEid,                     # 原始 Eid, Pid 引用
         pathidE[:, 2],            # Eiso
         pathidP[:, 2],            # Piso
-        costAll                   # 原始全量代价
+        costAll                   # Delta、子代价与子 reward
     ))
 
     return InterceptCandidates
@@ -290,9 +341,7 @@ def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, Is
     # 11-12: Eid, Pid (原始ID)/[0 1]而不是[0 2]
     # 13: Eiso (pathidE[:, 2])
     # 14: Piso (pathidP[:, 2])
-    # //15-17: costAll (如果是向量/矩阵，拼接全量)
-    # 15-19:(Delta_t, Delta_d, Delta_v, Delta_L,Delta_D,
-    # 20-24:cost_t, cost_d, cost_v, cost_L, cost_D))
+    # 15+: costAll（15 列：Delta×5 + 子 cost×5 + 子 reward×5）
     
     InterceptCandidates = np.column_stack((
         flattened_pairs[:,:7],          # 0-6 (te, tp, ETPid, PTPid, idxE, idxP, dist)
@@ -303,7 +352,7 @@ def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, Is
         PEid,                     # 11-12: Eid, Pid
         pathidE[:, 2],            # 13: Eiso
         pathidP[:, 2],            # 14: Piso
-        costAll                   # 15-17: costAll
+        costAll                   # 15-29: Delta、子代价与子 reward
     ))
 
     return InterceptCandidates

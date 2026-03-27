@@ -1,8 +1,24 @@
-"""Dubins 拦截多智能体强化学习包（marl0327）。"""
+from .MARL_env import TODCMARLEnv
+from .models import (
+	SCHEME_KEY_TO_NAME,
+	TODCHeteroActorCritic,
+	UAVInterceptionNetwork,
+	build_actor_critic_schemes,
+	design_mode_to_name,
+	resolve_design_mode,
+)
+from .obs_generator import TODCObservationGenerator
+from .rewards import RewardConfig, TODCRewardFunction
 
-from marl0327.config import MARLConfig
-from marl0327.env import DubinsInterceptEnvConfig, DubinsInterceptMARLEnv
-
-__all__ = ["MARLConfig", "DubinsInterceptEnvConfig", "DubinsInterceptMARLEnv", "__version__"]
-
-__version__ = "0.1.0"
+__all__ = [
+	"TODCMARLEnv",
+	"TODCObservationGenerator",
+	"TODCHeteroActorCritic",
+	"UAVInterceptionNetwork",
+	"SCHEME_KEY_TO_NAME",
+	"resolve_design_mode",
+	"design_mode_to_name",
+	"build_actor_critic_schemes",
+	"RewardConfig",
+	"TODCRewardFunction",
+]

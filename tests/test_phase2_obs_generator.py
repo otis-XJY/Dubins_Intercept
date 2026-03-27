@@ -77,7 +77,7 @@ def test_phase2_action_masking_fallback_distribution():
 
     # 全 0 动作应被归一化到有效 mask 上
     zero_action = np.zeros((env.num_P, obs["self_pts"].shape[1]), dtype=np.float32)
-    normalized = env._normalize_action(zero_action)
+    normalized, _idx = env._normalize_action(zero_action)
 
     mask = obs["self_pts_mask"].astype(np.float32)
     for i in range(env.num_P):

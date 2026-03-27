@@ -20,7 +20,6 @@ def test_train_online_single_scheme_smoke():
         device="cpu",
         schemes=["Concatenative Query Network"],
         step_mode="time",
-        max_inner_ticks=3,
         allow_dummy_if_missing=True,
         enable_dwa_replan=False,
         wandb_mode="disabled",
@@ -44,7 +43,6 @@ def test_train_online_eval_best_and_replay(tmp_path: Path):
         device="cpu",
         schemes=["Gated Query Network"],
         step_mode="time",
-        max_inner_ticks=2,
         allow_dummy_if_missing=True,
         enable_dwa_replan=False,
         wandb_mode="disabled",
@@ -83,10 +81,10 @@ def test_load_config_file_yaml_and_json(tmp_path: Path):
     assert cfg_yaml["reward"]["dist_progress_scale"] == 0.08
 
     json_path = tmp_path / "cfg.json"
-    json_path.write_text('{"episodes": 4, "max_inner_ticks": 16}', encoding="utf-8")
+    json_path.write_text('{"episodes": 4, "time_res": 0.5}', encoding="utf-8")
     cfg_json = _load_config_file(str(json_path))
     assert cfg_json["episodes"] == 4
-    assert cfg_json["max_inner_ticks"] == 16
+    assert cfg_json["time_res"] == 0.5
 
 
 def test_parse_gpu_ids():

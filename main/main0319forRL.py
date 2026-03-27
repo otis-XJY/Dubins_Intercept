@@ -212,7 +212,8 @@ with writer.saving(fig, output_video_name, dpi=100):
     step = 0  # 决策步: 仅在触发重规划时递增
     decision_outputs = []
     while (not np.all(Capflag)) and (t_all < length_E_max /v_E):
-##############################——————————————————————————————————env.update for cursor
+##############################——————————————————————————————————env.update for cursor 
+#  RL: _phase_update
         # --- 1. 时间更新 ---
         t += TimeRes / Stepsize
         t_all += TimeRes / Stepsize
@@ -230,7 +231,7 @@ with writer.saving(fig, output_video_name, dpi=100):
 
         flagPlot=1 if len(UnCapPidNew)!=len(UnCapPid) else 0
 
-
+#  RL: _advance_from_paths//_phase_geometry_step
     ############################################################从这转化
 
         # --- 1. 计算当前时间步在路径中的索引 ---
@@ -262,7 +263,7 @@ with writer.saving(fig, output_video_name, dpi=100):
         # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
             PathEpre[id] = PathE[np.where(eid==UnCapEid)[0][0]]
 
-
+#  RL: _phase_check_decision
     #########################################################
         # 注：如果 PathE2Val_true 的结构是 (2 x Time)，则改为：
         # PathE2Val_true[i][:, min(...)]
@@ -275,6 +276,7 @@ with writer.saving(fig, output_video_name, dpi=100):
         # --- 5. 重新规划逻辑 ---
 ##############################——————————————————————————————————env.step begin for cursor
         if not flagIn:
+# RL: _compute_isomap_intercept_candidates
             step += 1
             # 轨迹预测
             traj = [PathE2Val_true[i][:int(t_all * v_E), :] for i in range(num_E)]
@@ -465,10 +467,10 @@ with writer.saving(fig, output_video_name, dpi=100):
                 )
 
 
-# plt.figure(figsize=(10, 8))
-# draw_candidates(IC_candidates, IsoMap_i_tt_P2Iso, IsoMap_i_tt_E2Iso, pathFinalE2ValIn, pathFinalP2TP)
-# Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in)
-# plt.show()
+    # plt.figure(figsize=(10, 8))
+    # draw_candidates(IC_candidates, IsoMap_i_tt_P2Iso, IsoMap_i_tt_E2Iso, pathFinalE2ValIn, pathFinalP2TP)
+    # Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in)
+    # plt.show()
                 # --- 任务指派 (完全向量化替代 accumarray/matchpairs) ---
 
                 # 1. 识别所有唯一的 (Pid_ref, Eid_ref) 组合
@@ -488,7 +490,7 @@ with writer.saving(fig, output_video_name, dpi=100):
 
                 # 转换为 numpy 数组
                 IC_candidates = np.array(best_candidates_list)
-
+# RL:_apply_hungarian_and_paths
                 # --- 2. 构建代价矩阵 ---
                 # 将原始 ID 映射为 0~N 的矩阵索引
                 E_set, e_inv = np.unique(IC_candidates[:, 11], return_inverse=True)
@@ -516,7 +518,7 @@ with writer.saving(fig, output_video_name, dpi=100):
                 # 利用 CandidateIdxMat 一次性取出对应的原始 IC 数据行
                 final_rows = CandidateIdxMat[p_final, e_final]
                 AssignedIntercepts = IC_candidates[final_rows]
-                
+# RL:
                 # 提取 [Eid, Pid] 配对
                 pairs_realE2P_ = AssignedIntercepts[:, [11, 12]]
 
@@ -541,6 +543,7 @@ with writer.saving(fig, output_video_name, dpi=100):
                     rl_cfg,
                 )
 
+# RL: _apply_paths_from_assigned_rows
                 # 纯转移#############################################纯转移
 
                 # --- 1. Evader 路径处理 (全推导式实现) ---
@@ -666,6 +669,7 @@ with writer.saving(fig, output_video_name, dpi=100):
         # writer.grab_frame()
         # ======================
 ##############################——————————————————————————————————env.check for cursor
+# RL: _update_capflag_from_geometry
         # 更新距离用于循环判断
         distances = np.linalg.norm(
             PosP[:, :2] - 
