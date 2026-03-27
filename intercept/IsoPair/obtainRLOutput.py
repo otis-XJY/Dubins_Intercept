@@ -43,9 +43,6 @@ def obtain_output_iso(InterceptCandidates, IsoMapP2TP_i_tt, IsoMapE2ValIn_i_tt):
     ValPosId = InterceptCandidates[:, 9].astype(int)
     TPId = InterceptCandidates[:, 10].astype(int)
 
-    color_p = color_map((plot_ids * 2) % 20)
-    color_e = color_map((plot_ids * 2 + 1) % 20)
-
     iso_p_points = _extract_iso_points(IsoMapP2TP_i_tt, Pid, tp, IsoIdxP)
     outputIsoP=np.hstack((iso_p_points,InterceptCandidates[:,15:]))
     return outputIsoP
