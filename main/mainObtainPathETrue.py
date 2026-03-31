@@ -383,6 +383,8 @@ Evader = np.array([
     [1800, 1950, -np.pi/2]
 ])
 
+Map['Evader']=Evader
+
 # MATLAB id = [3, 2, 1]，对应 Python 索引为 [2, 1, 0]
 id_list = np.array([3, 2, 1])
 ValuePosOb = ValuePos[id_list - 1, :] # 注意：ValuePos 需要预先定义

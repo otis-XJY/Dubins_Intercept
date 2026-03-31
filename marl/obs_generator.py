@@ -60,6 +60,7 @@ class TODCObservationGenerator:
         ic_candidates: np.ndarray,
         candidate_pos_fn: Optional[Callable[[np.ndarray, int], Tuple[float, float]]] = None,
         inferred_targets: Optional[np.ndarray] = None,
+        pairs_realE2P: np.ndarray,
     ) -> Dict[str, np.ndarray]:
         v_p_nodes = self._build_p_nodes(pos_p, v_p)
         v_e_nodes = self._build_e_nodes(pos_e, v_e, value_pos, inferred_targets)
@@ -71,6 +72,7 @@ class TODCObservationGenerator:
             pos_e=pos_e,
             value_pos=value_pos,
             candidate_pos_fn=candidate_pos_fn,
+            pairs_realE2P=pairs_realE2P,
         )
 
         model_obs = self._build_model_aligned_obs(
@@ -216,15 +218,14 @@ class TODCObservationGenerator:
         pos_e: np.ndarray,
         value_pos: np.ndarray,
         candidate_pos_fn: Optional[Callable[[np.ndarray, int], Tuple[float, float]]],
+        pairs_realE2P: np.ndarray,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         subsets = []
         max_k = 0
-        for pid in range(num_p):
-            subset = np.empty((0, 0), dtype=float)
-            if ic_candidates is not None and ic_candidates.size > 0:
-                subset = ic_candidates
-                if ic_candidates.shape[1] > self.cols.pid_ref:
-                    subset = ic_candidates[ic_candidates[:, self.cols.pid_ref].astype(int) == pid]
+        for eid,pid in pairs_realE2P:
+            eidMask = (ic_candidates[:, self.cols.eid_ref].astype(int) == eid)
+            pidMask = (ic_candidates[:, self.cols.pid_ref].astype(int) == pid)
+            subset = ic_candidates[eidMask & pidMask]
             subsets.append(subset)
             max_k = max(max_k, int(subset.shape[0]) if subset.ndim > 0 else 0)
 

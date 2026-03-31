@@ -53,7 +53,6 @@ class TODCMARLEnv(gym.Env):
         # Dynamic candidate length: k_max is inferred from current candidates per step.
         self.k_max = 1
         self.render_mode = self.config.get("render_mode", "none")
-        self.allow_dummy_if_missing = bool(self.config.get("allow_dummy_if_missing", True))
         self.enable_dwa_replan = bool(self.config.get("enable_dwa_replan", True))
         # step_mode="decision" makes one RL step align with one online decision event (replan).
         self.step_mode = str(self.config.get("step_mode", "decision")).lower()
@@ -236,13 +235,10 @@ class TODCMARLEnv(gym.Env):
                 break
 
         if selected_map_folder is None:
-            if not self.allow_dummy_if_missing:
-                raise FileNotFoundError(
-                    f"Cannot resolve static map assets in {self.map_root}. map_folder={selected_map_folder}"
-                )
-            self.real_mode = False
-            self._init_dummy_world()
-            return
+            raise FileNotFoundError(
+                f"Cannot resolve static map assets in {self.map_root}. "
+                f"Required files: {required_map_files}"
+            )
 
         map_base = os.path.join(self.map_root, selected_map_folder)
         resolved = {k: os.path.join(map_base, v) for k, v in map_names.items()}
@@ -250,15 +246,10 @@ class TODCMARLEnv(gym.Env):
         self.evader_profile_dirs = self._discover_evader_profile_dirs(map_base)
 
         if len(self.evader_profile_dirs) == 0:
-            if not self.allow_dummy_if_missing:
-                raise FileNotFoundError(
-                    f"No evader profile found under {map_base}. Expected map/<TimeMap>/<slot>/PathE2Val_true.jbl"
-                )
-            self.real_mode = False
-            self._init_dummy_world()
-            return
+            raise FileNotFoundError(
+                f"No evader profile found under {map_base}. Expected map/<TimeMap>/<slot>/PathE2Val_true.jbl"
+            )
 
-        self.real_mode = True
         self.Map = joblib.load(resolved["Map"])
         self.IsoMapPTP2Iso_i_tt = joblib.load(resolved["IsoMapPTP2Iso_i_tt"])
         self.IsoMapPIso2TP_i_tt = joblib.load(resolved["IsoMapPIso2TP_i_tt"])
@@ -279,19 +270,14 @@ class TODCMARLEnv(gym.Env):
         self.Trans_Point = self.Map["Trans_Point"]
         self.ValuePos = self.Map["ValuePos"]
         self.PStart_Point = self.Map["PStart_Point"]
+        self.Evader = self.Map["Evader"]
         self.timeIsoRes = self.Map["timeIsoRes"]
 
-        self.Evader0 = np.asarray(
-            self.config.get(
-                "evader_init",
-                [[200, 1950, -np.pi / 2], [1000, 1950, -np.pi / 2], [1800, 1950, -np.pi / 2]],
-            ),
-            dtype=float,
-        )
+
 
         self._load_evader_profile(self.evader_profile_dirs[0])
 
-        self.num_E = int(self.Evader0.shape[0])
+        self.num_E = int(self.Evader.shape[0])
         self.num_P = int(self.PStart_Point.shape[0])
         self.agents = [f"p_{i}" for i in range(self.num_P)]
 
@@ -320,62 +306,6 @@ class TODCMARLEnv(gym.Env):
         ]
         self.CapRef["obs_polygons"] = self.obs_polygons
 
-    def _init_dummy_world(self):
-        self.Stepsize = 0.05
-        self.v_P = 25.0
-        self.v_E = 18.0
-        self.timeIsoRes = 1.0
-        self.PStart_Point = np.array(
-            [[200.0, 120.0, np.pi / 2], [500.0, 120.0, np.pi / 2], [800.0, 120.0, np.pi / 2]], dtype=float
-        )
-        self.Evader0 = np.array(
-            [[220.0, 900.0, -np.pi / 2], [520.0, 900.0, -np.pi / 2], [820.0, 900.0, -np.pi / 2]], dtype=float
-        )
-        self.Trans_Point = np.array(
-            [[150.0, 500.0, 0.0], [500.0, 500.0, 0.0], [850.0, 500.0, 0.0]], dtype=float
-        )
-        self.ValuePos = np.array(
-            [[200.0, 60.0, -np.pi / 2], [500.0, 60.0, -np.pi / 2], [800.0, 60.0, -np.pi / 2]], dtype=float
-        )
-        self.obs = []
-        self.sure = 20
-        self.obs_no_circle = []
-        self.obs_no_circle_in = []
-        self.obs_polygons = []
-
-        horizon = 800
-        self.PathE2Val_true = []
-        for i in range(self.Evader0.shape[0]):
-            xs = np.full(horizon, self.Evader0[i, 0])
-            ys = np.linspace(self.Evader0[i, 1], self.ValuePos[i, 1], horizon)
-            yaw = -np.pi / 2 * np.ones(horizon)
-            self.PathE2Val_true.append(np.column_stack((xs, ys, yaw)))
-
-        self.length_E_max = horizon
-        self.num_E = int(self.Evader0.shape[0])
-        self.num_P = int(self.PStart_Point.shape[0])
-        self.agents = [f"p_{i}" for i in range(self.num_P)]
-
-        cap_dist = float(self.config.get("cap_dist", 120.0))
-        self.CapRef = {
-            "CapDist": cap_dist,
-            "CapAngle": float(self.config.get("cap_angle", 90.0)),
-            "Stepsize": self.Stepsize,
-            "CapDistRef": float(self.config.get("cap_dist_ref", 250.0)),
-            "v_P": self.v_P,
-            "v_E": self.v_E,
-            "timeIsoRes": self.timeIsoRes,
-            "obs_polygons": self.obs_polygons,
-        }
-        self.E_PreRef = {
-            "num_v": 10,
-            "num_w": 10,
-            "v_range": [50, 100],
-            "w_range": [-np.pi / 6, np.pi / 6],
-            "Stepsize": self.Stepsize,
-            "T_pred": 1,
-        }
-
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None):
         super().reset(seed=seed)
         options = options or {}
@@ -388,10 +318,9 @@ class TODCMARLEnv(gym.Env):
         if isinstance(reward_opts, dict) and len(reward_opts) > 0:
             self.set_reward_params(**reward_opts)
 
-        if self.real_mode:
-            profile_dir = self._select_profile_dir(options)
-            self._load_evader_profile(profile_dir)
-            self.current_profile = os.path.relpath(profile_dir, self.map_root)
+        profile_dir = self._select_profile_dir(options)
+        self._load_evader_profile(profile_dir)
+        self.current_profile = os.path.relpath(profile_dir, self.map_root)
 
         self.episode_step = 0
         self.decision_step = 0
@@ -399,7 +328,7 @@ class TODCMARLEnv(gym.Env):
         self.t_all = 0.0
         self._t_all_at_path_start = 0.0
 
-        self.PosE = self.Evader0.copy()
+        self.PosE = self.Evader.copy()
         self.PosP = self.PStart_Point.copy()
 
         self.PathPtrue = [p.reshape(-1, 1) for p in self.PosP]
@@ -424,24 +353,25 @@ class TODCMARLEnv(gym.Env):
         self._ic_best_per_pair = None
 
         # main0319: 内层 _phase_update -> _phase_geometry_step -> _phase_check_decision 直至 DWA 需重规划 (line 264)，再构建候选
-        if self.real_mode:
-            hit_decision, terminal_before_agent = self._rollout_until_dwa_decision()
-            if hit_decision:
-                if not self._compute_isomap_intercept_candidates():
-                    self._try_replan()
-            else:
-                self._dummy_candidates()
-            self._episode_terminal_pending = bool(terminal_before_agent and not hit_decision)
-        else:
-            self._dummy_candidates()
-            self._episode_terminal_pending = False
+        while not np.all(self.Capflag) and (self.t_all < self.length_E_max /self.v_E):
+            self._phase_update()
+            self._phase_geometry_step()
+            need_replan, terminal = self._phase_check_decision()
+            if terminal:
+                break
+            if need_replan:
+                self._replan_with_isomap()
+                break
+            self._update_capflag_from_geometry()
+
+
 
         self.last_min_dist = self._pairwise_dist().min(axis=1)
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
         info = {
-            "real_mode": self.real_mode,
-            "replanned": bool(self.real_mode),
+            "real_mode": True,
+            "replanned": True,
             "num_candidates": int(self.IC_candidates.shape[0]),
             "time_map": self.time_map,
             "profile": self.current_profile,
@@ -512,73 +442,29 @@ class TODCMARLEnv(gym.Env):
         if decision_mode:
             # One RL step: 先应用动作，再内层循环 main0319：update -> _phase_geometry_step -> check，
             # 直至 need_replan、全局回合时间到、或其它终止。
-            if self.real_mode:
-                self._apply_assignment_from_action(action_indices)
+            self._apply_assignment_from_action(action_indices)
 
             t_all_before = float(self.t_all)
-            terminal = False
-            # t：本段 Path 执行时间（replan 时随 t=0 重置）；t_all：全局仿真时间。恒有 t_all = _t_all_at_path_start + t。
-            # 回合时间上限用路径段变量表达：t >= max_t_ep - _t_all_at_path_start（与 main0319forRL L214 的 t_all 上限等价）
-            max_t_episode = float(self.length_E_max) / float(self.v_E)
-            while not np.all(self.Capflag):
-                if self.t >= max_t_episode - self._t_all_at_path_start - 1e-9:
-                    terminal = True
-                    break
+            
+            while not np.all(self.Capflag) and (self.t_all < self.length_E_max /self.v_E):
                 self._phase_update()
-                self._phase_geometry_step(action_weights)
+                self._phase_geometry_step()
                 need_replan, terminal = self._phase_check_decision()
                 if terminal:
-                    stats.collision = bool(self._check_collision())
                     break
                 if need_replan:
-                    stats.replanned = True
+                    self._replan_with_isomap()
                     break
+                self._update_capflag_from_geometry()
 
-            if stats.replanned and not terminal and self.real_mode:
+            if stats.replanned and not terminal:
                 self._compute_isomap_intercept_candidates()
                 self._update_capflag_from_geometry()
-            elif stats.replanned and not terminal and not self.real_mode:
-                self._dummy_candidates()
 
             stats.captured = int(np.sum(~prev_cap & self.Capflag))
             self.decision_step += 1
             self.episode_step += 1
             delta_t_all = float(self.t_all) - t_all_before
-        else:
-            # time mode: 每 RL 步推进一次仿真时间（t/t_all 各 +sim_dt）
-            t_all_before = float(self.t_all)
-            self._phase_update()
-            self._phase_geometry_step(action_weights)
-            delta_t_all = float(self.t_all) - t_all_before
-
-            if self.real_mode and self.enable_dwa_replan:
-                try:
-                    # pos_e, path_pre = self._dwa_pos_e_and_path_pre()
-                    min_dists, _ = obtainDWAprePath(self.PosE, self.PathEpre, self.E_PreRef)
-                    if not np.all(min_dists <= 10):
-                        self._try_replan()
-                        stats.replanned = True
-                        self.decision_step += 1
-                except Exception:
-                    self._try_replan()
-                    stats.replanned = True
-                    self.decision_step += 1
-
-            distances_now = self._pairwise_dist()
-            assignments_now = np.argmin(distances_now, axis=0)
-            p_for_e_now = self.PosP[assignments_now]
-            e_now = self.PosE
-            dx_now = e_now[:, 0] - p_for_e_now[:, 0]
-            dy_now = e_now[:, 1] - p_for_e_now[:, 1]
-            ang_pe_now = np.degrees(np.arctan2(dy_now, dx_now))
-            angle_diff_now = (ang_pe_now - np.degrees(p_for_e_now[:, 2]) + 180.0) % 360.0 - 180.0
-            cap_dist = self.CapRef["CapDist"]
-            cap_angle_half = self.CapRef["CapAngle"] / 2.0
-            prev_cap_t = self.Capflag.copy()
-            self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
-            stats.captured = int(np.sum(~prev_cap_t & self.Capflag))
-            stats.collision = bool(self._check_collision())
-            self.episode_step += 1
 
         rewards, reward_details = self._compute_rewards(action_indices, sim_time_elapsed=delta_t_all)
         asset_breached = self._check_asset_breach()
@@ -664,55 +550,8 @@ class TODCMARLEnv(gym.Env):
         # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
             self.PathEpre[id] = self.PathE[np.where(eid==self.UnCapEid)[0][0]]
 
-    def _advance_dummy(self, actions: Optional[np.ndarray] = None):
-        """Dummy 动力学：按离散候选索引 `last_action_indices` 取目标点（训练侧传入的为采样索引，非概率向量）。"""
-        targets = np.zeros((self.num_P, 2), dtype=float)
-        obs_now = self._build_obs()
-        cand_nodes = obs_now["self_pts"][:, :, :6]
-        cand_mask = np.asarray(obs_now["self_pts_mask"], dtype=np.float32)
-        for pid in range(self.num_P):
-            c_feat, c_mask = cand_nodes[pid], cand_mask[pid]
-            valid = c_mask > 0
-            if np.any(valid):
-                sel = int(self.last_action_indices[pid])
-                k_curr = int(c_feat.shape[0])
-                valid_idx = np.where(valid)[0]
-                if sel < 0 or sel >= k_curr or c_mask[sel] <= 0:
-                    sel = int(valid_idx[0])
-                targets[pid] = c_feat[sel, :2]
-            else:
-                targets[pid] = self.PosE[pid % self.num_E, :2]
-
-        dt = self.time_res
-        for pid in range(self.num_P):
-            vec = targets[pid] - self.PosP[pid, :2]
-            dist = np.linalg.norm(vec)
-            if dist > 1e-6:
-                direction = vec / dist
-            else:
-                direction = np.array([np.cos(self.PosP[pid, 2]), np.sin(self.PosP[pid, 2])])
-            step_len = min(dist, self.v_P * dt)
-            self.PosP[pid, 0:2] += direction * step_len
-            self.PosP[pid, 2] = np.arctan2(direction[1], direction[0])
-            self.PathPtrue[pid] = np.hstack((self.PathPtrue[pid], self.PosP[pid].reshape(-1, 1)))
-
-        for eid in range(self.num_E):
-            target = self.ValuePos[eid % len(self.ValuePos), :2]
-            vec = target - self.PosE[eid, :2]
-            dist = np.linalg.norm(vec)
-            if dist > 1e-6:
-                direction = vec / dist
-            else:
-                direction = np.array([0.0, -1.0])
-            step_len = min(dist, self.v_E * dt)
-            self.PosE[eid, 0:2] += direction * step_len
-            self.PosE[eid, 2] = np.arctan2(direction[1], direction[0])
-
     def _try_replan(self):
-        try:
-            self._replan_with_isomap()
-        except Exception:
-            self._dummy_candidates()
+        self._replan_with_isomap()
 
     def _replan_with_isomap(self):
         """Full replan: build candidates + Hungarian assignment + paths (legacy / smoke tests)."""
@@ -721,7 +560,7 @@ class TODCMARLEnv(gym.Env):
         self._apply_hungarian_and_paths()
 
     def _compute_isomap_intercept_candidates(self) -> bool:
-        """Build iso maps and intercept table; cache geometry for _apply_paths_from_assigned_rows. Returns False on fallback."""
+        """Build iso maps and intercept table; cache geometry for _apply_paths_from_assigned_rows. Raises if no valid IsoPairs."""
         traj = [self.PathE2Val_true[i][: max(2, int(self.t_all * self.v_E)), :] for i in range(self.num_E)]
         targets = self.ValuePos[:, :2]
         res = predictLikelyTargetNew(traj, targets)
@@ -810,10 +649,8 @@ class TODCMARLEnv(gym.Env):
                 results.append([te, tp, e2tp_tp_idx[ide], p2tp_tp_idx[idp], pair_mat, eid, pid, ide, idp])
 
         if len(results) == 0:
-            print("no IsoPairs")
-            self._dummy_candidates()
             self._path_e2tp_cache = None
-            return False
+            raise RuntimeError("No IsoPairs: obtainPTP2TP_IsoPos_timeShift2 produced no valid pair matrices.")
 
         iso_pairs = np.array(results, dtype=object)
         iso_pairs = iso_pairs[np.argsort(iso_pairs[:, 0].astype(int))]
@@ -841,8 +678,7 @@ class TODCMARLEnv(gym.Env):
     def _apply_hungarian_and_paths(self):
         ic_candidates = self._ic_best_per_pair
         if ic_candidates is None or ic_candidates.size == 0:
-            self._dummy_candidates()
-            return
+            raise RuntimeError("Hungarian assignment has no per-pair intercept candidates (_ic_best_per_pair is empty).")
 
         e_set, e_inv = np.unique(ic_candidates[:, 11], return_inverse=True)
         p_set, p_inv = np.unique(ic_candidates[:, 12], return_inverse=True)
@@ -940,13 +776,10 @@ class TODCMARLEnv(gym.Env):
             self.UnCapEidNew = self.pairs_realE2P[~self.Capflag, 0].astype(int)
             self.pairs_realE2P = self.pairs_realE2P[~self.Capflag]
 
-    def _phase_geometry_step(self, dummy_actions: Optional[np.ndarray] = None) -> None:
+    def _phase_geometry_step(self) -> None:
         """与 main0319 几何推进段一致；对应内层物理步（非 Gym 的 step(action)）。"""
         """main0319:224-251 — 沿 Path 更新 P/E 几何状态。"""
-        if self.real_mode:
-            self._advance_from_paths()
-        else:
-            self._advance_dummy(dummy_actions)
+        self._advance_from_paths()
 
     def _phase_check_decision(self) -> Tuple[bool, bool]:
         """碰撞/资产/捕获几何与 DWA（main0319:258-264）。返回 (need_replan, terminal)。"""
@@ -959,7 +792,7 @@ class TODCMARLEnv(gym.Env):
         if self.num_E > 0 and np.all(self.Capflag):
             return False, True
         need_replan = False
-        if self.real_mode and self.enable_dwa_replan:
+        if self.enable_dwa_replan:
             try:
                 # pos_e, path_pre = self._dwa_pos_e_and_path_pre()
                 min_dists, _ = obtainDWAprePath(self.PosE, self.PathEpre, self.E_PreRef)
@@ -990,7 +823,7 @@ class TODCMARLEnv(gym.Env):
         self.Capflag = (distances_now <= self.CapRef["CapDist"]) & (np.abs(angleDiff) <= self.CapRef['CapAngle']/2)  
         return self.Capflag
 
-    def _single_inner_simulation_tick(self, dummy_actions: Optional[np.ndarray] = None) -> Tuple[bool, bool]:
+    def _single_inner_simulation_tick(self) -> Tuple[bool, bool]:
         """
         与 main0319forRL.py 单圈一致：先 L216-218 _phase_update(t,t_all)，再几何，再 DWA/check。
         供 reset 内 `_rollout_until_dwa_decision` 复用；decision 模式训练步在 `step()` 内已显式展开。
@@ -1001,7 +834,7 @@ class TODCMARLEnv(gym.Env):
             return False, True
 
         self._phase_update()
-        self._phase_geometry_step(dummy_actions)
+        self._phase_geometry_step()
         return self._phase_check_decision()
 
     def _rollout_until_dwa_decision(self) -> Tuple[bool, bool]:
@@ -1009,10 +842,8 @@ class TODCMARLEnv(gym.Env):
         Run inner loop (main0319:202)：每圈 _phase_update -> _phase_geometry_step -> check，直至 DWA 需重规划或回合结束。
         Returns (reached_decision_point, terminal).
         """
-        if not self.real_mode:
-            return True, False
         while True:
-            need_replan, terminal = self._single_inner_simulation_tick(None)
+            need_replan, terminal = self._single_inner_simulation_tick()
             if terminal:
                 return False, True
             if need_replan:
@@ -1023,7 +854,7 @@ class TODCMARLEnv(gym.Env):
 
         `action_indices` 为每个 P 的离散候选下标（与 train 中 Categorical.sample() 一致），非概率向量。
         """
-        if not self.real_mode or self._path_e2tp_cache is None:
+        if self._path_e2tp_cache is None:
             return
         try:
             obs = self._build_obs()
@@ -1051,41 +882,6 @@ class TODCMARLEnv(gym.Env):
         except Exception:
             self._apply_hungarian_and_paths()
 
-    def _dummy_candidates(self):
-        rows = []
-        for pid in range(self.num_P):
-            for eid in range(self.num_E):
-                pos = 0.6 * self.PosE[eid, :2] + 0.4 * self.PosP[pid, :2]
-                dist = np.linalg.norm(self.PosP[pid, :2] - self.PosE[eid, :2])
-                rows.append(
-                    [
-                        0,
-                        0,
-                        -1,
-                        -1,
-                        0,
-                        0,
-                        dist,
-                        dist,
-                        dist,
-                        eid,
-                        pid,
-                        eid,
-                        pid,
-                        0,
-                        0,
-                        1,
-                        1,
-                        1,
-                        pos[0],
-                        pos[1],
-                    ]
-                )
-        arr = np.array(rows, dtype=float)
-        IC = arr[:, :18]
-        self.IC_candidates = IC.copy()
-        self.ICFinal = IC.copy()
-
     def _pairwise_dist(self):
         pp = self.PosP[:, :2]
         ee = self.PosE[:, :2]
@@ -1094,7 +890,7 @@ class TODCMARLEnv(gym.Env):
     def _extract_candidate_pos(self, row: np.ndarray, pid: int) -> Tuple[float, float, float]:
 
         # 尝试使用 IsoMap 中的 IsoPos（与 _extract_iso_points 行为一致）
-        if self.real_mode and hasattr(self, "IsoMap_i_tt_P2Iso") and row.shape[0] > 6:
+        if hasattr(self, "IsoMap_i_tt_P2Iso") and row.shape[0] > 6:
             try:
                 # 常见布局（见 obtainRLOutput）: te=0, tp=1, IsoIdxE=4, IsoIdxP=5, eid=11, pid=12
                 tp_idx = int(row[1]) if row.shape[0] > 1 else 0
@@ -1236,11 +1032,6 @@ class TODCMARLEnv(gym.Env):
         return rewards, details
 
     def _check_collision(self) -> bool:
-        for p in self.PosP[:, :2]:
-            pt = Point(float(p[0]), float(p[1]))
-            for poly in self.obs_polygons:
-                if poly.contains(pt):
-                    return True
 
         d_pp = self._pairwise_self_dist(self.PosP[:, :2])
         if np.any((d_pp > 0) & (d_pp < self.collision_dist)):
@@ -1252,7 +1043,7 @@ class TODCMARLEnv(gym.Env):
             return False
 
         dist = np.linalg.norm(self.PosE[:, None, :2] - self.ValuePos[None, :, :2], axis=2)
-        return bool(np.any(dist <= float(self.reward_fn.config.asset_breach_radius)))
+        return bool(np.any(dist <= float(self.collision_dist)))
 
     @staticmethod
     def _pairwise_self_dist(pos: np.ndarray) -> np.ndarray:
@@ -1347,7 +1138,6 @@ def smoke_test():
     env = TODCMARLEnv(
         {
             "render_mode": "none",
-            "allow_dummy_if_missing": True,
             "max_episode_steps": 50,
         }
     )

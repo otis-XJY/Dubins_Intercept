@@ -87,11 +87,7 @@ ValuePos = Map['ValuePos']
 PStart_Point=Map['PStart_Point']
 timeIsoRes=Map['timeIsoRes']
 # 3. 定义 Evader 矩阵
-Evader = np.array([
-    [200, 1950, -np.pi/2],
-    [1000, 1950, -np.pi/2],
-    [1800, 1950, -np.pi/2]
-])
+Evader = Map['Evader']
 
 # 4. 初始化 E_PreRef 结构体 (在 Python 中使用字典)
 E_PreRef = {
@@ -518,7 +514,6 @@ with writer.saving(fig, output_video_name, dpi=100):
                 # 利用 CandidateIdxMat 一次性取出对应的原始 IC 数据行
                 final_rows = CandidateIdxMat[p_final, e_final]
                 AssignedIntercepts = IC_candidates[final_rows]
-# RL:
                 # 提取 [Eid, Pid] 配对
                 pairs_realE2P_ = AssignedIntercepts[:, [11, 12]]
 
@@ -544,6 +539,7 @@ with writer.saving(fig, output_video_name, dpi=100):
                 )
 
 # RL: _apply_paths_from_assigned_rows
+# RL: 这里应该是step的开始，确定具体的ICFinal并构建P和E的未来路径
                 # 纯转移#############################################纯转移
 
                 # --- 1. Evader 路径处理 (全推导式实现) ---
