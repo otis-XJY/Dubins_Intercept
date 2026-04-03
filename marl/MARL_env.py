@@ -796,7 +796,7 @@ class TODCMARLEnv(gym.Env):
             self._sync_dynamic_k(obs)
             mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
             assigned_rows = []
-            for pid in range(self.num_P):
+            for pid in self.UnCapPidNew:
                 subset = self.ICFinalActionCandidates[self.ICFinalActionCandidates[:, 12].astype(int) == pid]
                 n = int(subset.shape[0])
                 idx = int(action_indices[pid])
