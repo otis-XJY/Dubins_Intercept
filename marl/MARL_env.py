@@ -431,6 +431,7 @@ class TODCMARLEnv(gym.Env):
                     break
                 self._update_capflag_from_geometry()
 
+            # TODO:测试如果个数变化会发生什么
             stats.captured = int(np.sum(~prev_cap & self.Capflag))
             self.decision_step += 1
             self.episode_step += 1
@@ -497,21 +498,20 @@ class TODCMARLEnv(gym.Env):
         seg_start = int(round((self.t - self.time_res / self.Stepsize) * self.v_P))
         seg_end = curr_idx_p
 
-        new_pos_p = []
-        for pid in range(self.num_P):
-            path = self.PathP[pid]
-            idx = min(curr_idx_p, path.shape[1] - 1)
-            new_pos_p.append(path[:, idx])
-            seg = path[:, max(0, seg_start) : max(max(0, seg_start), seg_end)]
-            if seg.size > 0:
-                self.PathPtrue[pid] = np.hstack((self.PathPtrue[pid], seg))
-        self.PosP = np.asarray(new_pos_p)
+        self.PosP = np.array([self.PathP[np.where(pid==self.UnCapPid)[0][0]][:,min(curr_idx_p, self.PathP[np.where(pid==self.UnCapPid)[0][0]].shape[1] - 1)]
+        for pid in self.UnCapPidNew])
+
+        for id,pid in enumerate(self.UnCapPidNew):
+        # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
+            self.PathPtrue[pid] = np.hstack((self.PathPtrue[pid], self.PathP[np.where(pid==self.UnCapPid)[0][0]][:, max(0, seg_start) : seg_end]))
+
+
 
         curr_idx_e = int(round(self.t_all * self.v_E))
         self.PosE = np.array(
             [
                 self.PathE2Val_true[eid][min(curr_idx_e, self.PathE2Val_true[eid].shape[0] - 1), :]
-                for eid in range(self.num_E)
+                for eid in self.UnCapEidNew
             ]
         )
 
@@ -523,7 +523,6 @@ class TODCMARLEnv(gym.Env):
         """Full replan: build candidates + Hungarian assignment + paths (legacy / smoke tests)."""
         if not self._compute_isomap_intercept_candidates():
             return
-            # TODO:应该是model获得的action
         self._apply_hungarian_and_paths()
 
     def _compute_isomap_intercept_candidates(self) -> bool:
@@ -535,6 +534,10 @@ class TODCMARLEnv(gym.Env):
         pairs_e2val = np.column_stack((np.arange(len(validnew)), validnew))
 
         _, near_tpid_e = obtainNearETP(self.Trans_Point[:, :2], self.PosE, self.ValuePos, pairs_e2val)
+
+        self.UnCapEid=self.UnCapEidNew
+        self.UnCapPid=self.UnCapPidNew
+
 
         path_e2tp, iso_e2tp, e2tp_results = obtainPE2TP(
             self.IsoMapEIso2TP_i_tt,
@@ -634,7 +637,6 @@ class TODCMARLEnv(gym.Env):
             best_candidates_list.append(group[sort_idx[0]])
         ic_candidates = np.array(best_candidates_list)
         self._ic_best_per_pair = ic_candidates
-
         self._path_e2tp_cache = path_e2tp
         self._path_p2tp_cache = path_p2tp
         self._e2tp_tp_idx_cache = e2tp_tp_idx
@@ -679,7 +681,7 @@ class TODCMARLEnv(gym.Env):
         mask = np.isin(ep_keys, pr_keys)
         self.ICFinalActionCandidates = self.IC_candidates[mask]
 
-        # TODO:应该是model获得的action,而不是直接使用任务分配的结果
+        # 应该是model获得的action,而不是直接使用任务分配的结果
         # self._apply_paths_from_assigned_rows(assigned)
 
     def _apply_paths_from_assigned_rows(self, assigned: np.ndarray):
@@ -759,7 +761,8 @@ class TODCMARLEnv(gym.Env):
             try:
                 # pos_e, path_pre = self._dwa_pos_e_and_path_pre()
                 min_dists, _ = obtainDWAprePath(self.PosE, self.PathEpre, self.E_PreRef)
-                need_replan = not bool(np.all(min_dists <= 10))
+                # TODO:测试这个数值
+                need_replan = not bool(np.all(min_dists <= 50))
             except Exception:
                 need_replan = True
         return need_replan, False
@@ -859,7 +862,6 @@ class TODCMARLEnv(gym.Env):
             value_pos=self.ValuePos,
             num_p=self.num_P,
             num_e=self.num_E,
-            # TODO:关注这个ic最后指向的信息是什么？
             ic_candidates=self.ICFinalActionCandidates,
             candidate_pos_fn=self._extract_candidate_pos,
             inferred_targets=inferred_targets,
