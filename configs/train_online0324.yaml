@@ -1,50 +1,141 @@
+# =============================================================================
+# Dubins 拦截 · 在线 MARL 训练配置（对应 marl/train_online0325.py 的 TrainConfig）
+# =============================================================================
+#
+# 【如何启动训练】
+#   1) 进入项目根目录，激活环境（示例）：
+#        conda activate dubins
+#   2) 使用本文件（脚本默认即此路径，也可显式指定）：
+#        python -m marl.train_online0325 --config configs/train_online0324.yaml
+#   3) 命令行可覆盖 YAML 中任意同名项（优先级高于配置文件），例如：
+#        python -m marl.train_online0325 --config configs/train_online0324.yaml --episodes 50 --device cpu
+#   4) 仅部分覆盖奖励时，可用 --reward-json '{"step_cost":-0.1}'（会整段替换 reward 字典，慎用）
+#
+# 【仅 YAML 中出现的键会生效】
+#   加载逻辑会把文件里的键合并进 TrainConfig；未写明的项使用代码里的默认值。
+#   环境专有参数（map_root、collision_dist、cap_dist、data_dir、time_map 等）写在下方可选 env 字典中，
+#   会合并进 TODCMARLEnv 的 config；也可用命令行 --env-json '{...}' 覆盖整个 env。
+#
+# 【无图形界面服务器】
+#   export MPLBACKEND=Agg
+#   否则 matplotlib 可能因无法打开显示后端而报错（render / wandb 截图依赖绘图）。
+#
+# 【wandb】
+#   - wandb_mode: online | offline | disabled（disabled 不写云端）
+#   - 首次使用需 wandb login；entity 填团队名或保持 null
+#   - 训练视频 / 步进截图需要：pip install imageio imageio-ffmpeg（后者自带 ffmpeg，便于服务器）
+#
+# 【多方案 schemes】
+#   下列名称与 marl/models.py 中 SCHEME_KEY_TO_NAME 一致；也可写别名 A / B / C 等（见 resolve_design_mode）。
+#
+# =============================================================================
+
+# --- 训练规模与随机性 ---
+# 总训练回合数（每个 scheme 各跑这么多 episode）
 episodes: 300
+# 单回合最大 RL 步数（超过则 truncated），传给 TODCMARLEnv.max_episode_steps
 max_episode_steps: 200
+seed: 42
+
+# --- 策略梯度（Actor-Critic）---
+# 回报折扣；critic 拟合目标中的 bootstrap 权重
 gamma: 0.99
+# 价值项系数、策略熵 bonus 系数（越大越鼓励探索）
 value_coef: 0.5
 entropy_coef: 0.01
 lr: 0.0003
+
+# --- 网络结构（marl/models.py TODCHeteroActorCritic）---
 hidden_dim: 128
 num_heads: 4
-seed: 42
+
+# --- 设备与多卡 ---
+# 例如 cuda:0；无 GPU 时用 cpu。若写 cuda 但机器无 CUDA，训练脚本会直接报错（不静默降级）
 device: cuda:0
+# true 时使用 torch.distributed（需用 torchrun 并设置 RANK/WORLD_SIZE/LOCAL_RANK 等）
 distributed: false
+# 多机多卡时常用 nccl；纯 CPU 分布式可用 gloo
 ddp_backend: nccl
 ddp_find_unused_parameters: false
+# true 且非 DDP 时，对多块 GPU 使用 DataParallel（需 gpu_ids 多于 1 才真正并行）
 multi_gpu: true
+# 使用的 GPU 编号：YAML 里可写整数 1 或字符串 "0,1"；与命令行 --gpu-ids 一致
 gpu_ids: 1
+
+# --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
-  - Concatenative Query Network
-  - Gated Query Network
-  - Point-Wise Scoring Network
+  - Concatenative Query Network   # 设计 A：拼接融合
+  - Gated Query Network           # 设计 B：门控融合
+  - Point-Wise Scoring Network    # 设计 C：逐候选点评分
+
+# --- 环境动力学（传入 TODCMARLEnv 的项）---
+# 与仿真步长相关的时间分辨率（见 env.time_res / sim_dt）
 time_res: 1.0
+# decision：一次 env.step 对应一次在线决策/重规划事件（与 main0319 内层循环一致）；time 为另一模式
 step_mode: decision
+# false：地图资源缺失时直接失败；true：允许占位数据（调试用）
 allow_dummy_if_missing: false
+# true：按 obtainDWAprePath 触发 DWA 预轨迹比较，过阈值则重规划（与 main0319 一致）
 enable_dwa_replan: true
+
+# --- 可选：直接传入 TODCMARLEnv(config) 的其它项（与上面 time_res/step_mode 等同传时，本字典优先覆盖同名键）---
+# env:
+#   map_root: /abs/path/to/map
+#   collision_dist: 25.0
+#   cap_dist: 200.0
+
+# --- 奖励权重（marl/rewards.py RewardConfig；仅下列字段会写入，其余键被忽略）---
 reward:
+  # 拦截质量：候选特征加权（dist_v, delta_t, delta_d, delta_theta, path_l）
   alpha_dist_v: 1.0
   beta_delta_t: 1.0
   gamma_delta_d: 1.0
   gamma_delta_theta: 1.0
   lambda_path_l: 1.0
+  # 全局：多机分散 + 多机追同一目标的惩罚
   w_global: 1.0
   div_sigma: 300.0
   assign_penalty: 5.0
+  # 安全：机间过近惩罚
   safe_dist_min: 120.0
   safe_penalty_scale: 0.5
+  # 每步时间代价、终局捕获/资产损失
   step_cost: -0.05
   terminal_capture_bonus: 100.0
   terminal_asset_loss_penalty: 500.0
   asset_breach_radius: 40.0
+  # 与距离进步相关的 shaping（0 为关闭）
   dist_progress_scale: 0.05
+
+# --- Weights & Biases ---
 wandb_project: dubins-marl-online
+# 团队/用户名；个人账号常填 null
 wandb_entity: null
 wandb_run_name: online_multi_scheme
+# online：实时上传；offline：本地缓存后同步；disabled：不初始化 wandb
 wandb_mode: online
+
+# --- 日志与评估 ---
+# 每多少 episode 打印一行训练摘要（仅 rank0）
 log_interval: 1
+# 每多少 episode 做一次贪心 eval（独立 env，带 rgb 渲染用于视频）
 eval_interval: 10
 eval_episodes: 1
+
+# --- 仅 rank0 + wandb 非 disabled 时生效的可视化 ---
+# 每多少个「全局 step」（所有 scheme 步数累加）上传一张 env.render() 到 {scheme}/step_image
+# 数值越小 wandb 上图片越密、流量/存储越大；0 表示关闭
+step_frame_interval: 10
+# 评估录像 eval_video 的帧率
+eval_video_fps: 10
+# 每 N 个训练 episode 上传整段训练 rollout 视频 {scheme}/train_episode_video；0 关闭
+wandb_train_video_every: 10
+train_wandb_video_fps: 10
+
+# --- 检查点与轨迹文件 ---
 save_dir: output/checkpoints
+# eval 回报创新高时保存 {scheme}_best.pt
 save_best: true
+# 是否在 eval 时把轨迹写入 replay_dir（npz）
 save_replay: false
 replay_dir: output/eval_traces

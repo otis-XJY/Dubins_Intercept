@@ -60,7 +60,7 @@ class TODCObservationGenerator:
         ic_candidates: np.ndarray,
         candidate_pos_fn: Optional[Callable[[np.ndarray, int], Tuple[float, float]]] = None,
         inferred_targets: Optional[np.ndarray] = None,
-        pairs_realE2P: np.ndarray,
+        pairs_realE2P: Optional[np.ndarray] = None,
     ) -> Dict[str, np.ndarray]:
         v_p_nodes = self._build_p_nodes(pos_p, v_p)
         v_e_nodes = self._build_e_nodes(pos_e, v_e, value_pos, inferred_targets)
@@ -218,11 +218,15 @@ class TODCObservationGenerator:
         pos_e: np.ndarray,
         value_pos: np.ndarray,
         candidate_pos_fn: Optional[Callable[[np.ndarray, int], Tuple[float, float]]],
-        pairs_realE2P: np.ndarray,
+        pairs_realE2P: Optional[np.ndarray],
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if pairs_realE2P is None:
+            raise ValueError(
+                "pairs_realE2P is None: observation requires an E–P assignment from replan (check step_mode / enable_dwa_replan / reset loop)"
+            )
         subsets = []
         max_k = 0
-        for eid,pid in pairs_realE2P:
+        for eid, pid in pairs_realE2P:
             eidMask = (ic_candidates[:, self.cols.eid_ref].astype(int) == eid)
             pidMask = (ic_candidates[:, self.cols.pid_ref].astype(int) == pid)
             subset = ic_candidates[eidMask & pidMask]

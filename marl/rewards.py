@@ -79,53 +79,47 @@ class TODCRewardFunction:
             details[f"p_{i}"]["r_progress"] = float(self.config.dist_progress_scale * delta[i])
             rewards[f"p_{i}"] += details[f"p_{i}"]["r_progress"]
 
-        reward_nodes = np.asarray(obs.get("reward_nodes", np.zeros((num_p, 1, 8), dtype=np.float32)), dtype=np.float32)
-        mask = np.asarray(obs.get("self_pts_mask", np.ones((num_p, reward_nodes.shape[1]), dtype=np.float32)), dtype=np.float32)
-        enemies = np.asarray(obs.get("enemies", np.zeros((num_p, 0, 3), dtype=np.float32)), dtype=np.float32)
+        reward_nodes = np.asarray(obs["reward_nodes"], dtype=np.float32)
+        mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
+        enemies = np.asarray(obs["enemies"], dtype=np.float32)
 
         k_curr = reward_nodes.shape[1]
         selected_idx = np.zeros((num_p,), dtype=np.int64)
         # 支持两种动作输入格式：
         # - 每个 agent 的采样索引（形状 (num_p,) 或标量/整型）
         # - 每个 agent 的权重向量 / 概率分布（形状 (num_p, k_curr))
+        # 非法索引、空掩码、维度不匹配时直接报错（与 MARL_env._normalize_action 一致，便于排查）
         actions_arr = np.asarray(actions)
         if actions_arr.ndim == 1:
-            # 视作每个 agent 的索引
             for i in range(num_p):
-                try:
-                    idx = int(actions_arr[i])
-                except Exception:
-                    valid_idx = np.where(mask[i] > 0)[0]
-                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
-                    continue
+                idx = int(actions_arr[i])
                 valid_idx = np.where(mask[i] > 0)[0]
-                if idx < 0 or idx >= k_curr or (valid_idx.size > 0 and not (mask[i, idx] > 0)):
-                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
-                else:
-                    selected_idx[i] = idx
+                if valid_idx.size == 0:
+                    raise ValueError(f"no valid reward candidates for pursuer {i} (self_pts_mask row is all zero)")
+                if idx < 0 or idx >= k_curr or mask[i, idx] <= 0:
+                    raise ValueError(f"invalid action index {idx} for pursuer {i} in reward (k={k_curr})")
+                selected_idx[i] = idx
         else:
             for i in range(num_p):
                 w = actions_arr[i]
                 w = np.asarray(w, dtype=np.float32)
                 if w.ndim == 0:
-                    # 标量 -> 视作索引
                     idx = int(w)
                     valid_idx = np.where(mask[i] > 0)[0]
-                    if idx < 0 or idx >= k_curr or (valid_idx.size > 0 and not (mask[i, idx] > 0)):
-                        selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
-                    else:
-                        selected_idx[i] = idx
+                    if valid_idx.size == 0:
+                        raise ValueError(f"no valid reward candidates for pursuer {i} (self_pts_mask row is all zero)")
+                    if idx < 0 or idx >= k_curr or mask[i, idx] <= 0:
+                        raise ValueError(f"invalid action index {idx} for pursuer {i} in reward (k={k_curr})")
+                    selected_idx[i] = idx
                     continue
                 if w.shape[0] != k_curr:
-                    valid_idx = np.where(mask[i] > 0)[0]
-                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
-                    continue
+                    raise ValueError(
+                        f"action weight length {w.shape[0]} != k_curr {k_curr} for pursuer {i}"
+                    )
                 weighted = w * mask[i]
                 if np.sum(weighted) <= 1e-12:
-                    valid_idx = np.where(mask[i] > 0)[0]
-                    selected_idx[i] = int(valid_idx[0]) if valid_idx.size > 0 else 0
-                else:
-                    selected_idx[i] = int(np.argmax(weighted))
+                    raise ValueError(f"action weights for pursuer {i} are zero on all valid candidates")
+                selected_idx[i] = int(np.argmax(weighted))
 
         selected = reward_nodes[np.arange(num_p), selected_idx]  # [P, 8]
 
@@ -167,7 +161,7 @@ class TODCRewardFunction:
         for i in range(num_p):
             details[f"p_{i}"]["r_global"] = float(r_global[i])
 
-        self_uav = np.asarray(obs.get("self_uav", np.zeros((num_p, 1, 3), dtype=np.float32)), dtype=np.float32)
+        self_uav = np.asarray(obs["self_uav"], dtype=np.float32)
         self_pos = self_uav[:, 0, :2]
         r_safe = np.zeros((num_p,), dtype=np.float32)
         if num_p > 1:

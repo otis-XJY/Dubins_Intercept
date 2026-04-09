@@ -13,14 +13,8 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 import imageio
 import tempfile
-import io
 
 from marl import TODCMARLEnv, build_actor_critic_schemes
-
-try:
-    import wandb
-except Exception:  # pragma: no cover
-    wandb = None
 
 
 @dataclass
@@ -60,12 +54,55 @@ class TrainConfig:
     # Visualization settings
     step_frame_interval: int = 50
     eval_video_fps: int = 10
+    # 每 N 个训练 episode 将整段 rollout 帧序列编码为 mp4 上传 wandb（0 关闭）
+    wandb_train_video_every: int = 0
+    train_wandb_video_fps: int = 10
+    # 合并进 TODCMARLEnv(config=...) 的额外项，例如 map_root、collision_dist、cap_dist（见 docs/MARL_OVERVIEW.md）
+    env: Optional[Dict] = None
+
+
+def _todc_marl_env_dict(cfg: TrainConfig, *, render_mode: str) -> Dict:
+    if cfg.env is not None and not isinstance(cfg.env, dict):
+        raise TypeError(f"TrainConfig.env must be dict or None, got {type(cfg.env)}")
+    out: Dict = {
+        "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
+        "max_episode_steps": cfg.max_episode_steps,
+        "time_res": cfg.time_res,
+        "step_mode": cfg.step_mode,
+        "enable_dwa_replan": cfg.enable_dwa_replan,
+        "reward": cfg.reward,
+    }
+    if cfg.env:
+        out.update(cfg.env)
+    out["render_mode"] = render_mode
+    return out
 
 
 def _set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def _write_mp4_from_frames(frames: Sequence[np.ndarray], fps: int) -> str:
+    tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    tmp_path = tmpf.name
+    tmpf.close()
+    with imageio.get_writer(tmp_path, fps=fps, codec="libx264") as writer:
+        for fr in frames:
+            fr_u8 = fr.astype(np.uint8) if fr.dtype != np.uint8 else fr
+            writer.append_data(fr_u8)
+    return tmp_path
+
+
+def _wandb_log_video(run, key: str, frames: Sequence[np.ndarray], fps: int, episode: int) -> None:
+    import wandb as _wandb
+
+    path = _write_mp4_from_frames(frames, fps)
+    try:
+        run.log({key: _wandb.Video(path, fps=fps, format="mp4"), "episode": episode})
+    finally:
+        os.remove(path)
 
 
 @dataclass
@@ -140,10 +177,8 @@ def _load_config_file(path: str) -> Dict:
         raw = f.read()
 
     if ext in (".yaml", ".yml"):
-        try:
-            import yaml  # type: ignore
-        except Exception as e:
-            raise RuntimeError("YAML config requires pyyaml installed") from e
+        import yaml  # type: ignore
+
         data = yaml.safe_load(raw)
     else:
         data = json.loads(raw)
@@ -199,9 +234,7 @@ def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = Tru
     if cfg.wandb_mode == "disabled":
         return None
 
-    if wandb is None:
-        print("[WARN] wandb is not installed, skip wandb logging.")
-        return None
+    import wandb
 
     run = wandb.init(
         project=cfg.wandb_project,
@@ -250,31 +283,16 @@ def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = Tru
         prefix = f"{scheme}/"
         for m in step_metrics:
             name = prefix + m
-            try:
-                wandb.define_metric(name, step_metric="global_step")
-            except Exception:
-                try:
-                    run.define_metric(name, step_metric="global_step")
-                except Exception:
-                    pass
+            wandb.define_metric(name, step_metric="global_step")
         for m in episode_metrics:
             name = prefix + m
-            try:
-                wandb.define_metric(name, step_metric="episode")
-            except Exception:
-                try:
-                    run.define_metric(name, step_metric="episode")
-                except Exception:
-                    pass
+            wandb.define_metric(name, step_metric="episode")
 
     # Also define top-level eval and global metrics
-    try:
-        wandb.define_metric("global_step")
-        wandb.define_metric("episode")
-        for m in ["eval_return", "eval_steps", "best_eval_return"]:
-            wandb.define_metric(m, step_metric="episode")
-    except Exception:
-        pass
+    wandb.define_metric("global_step")
+    wandb.define_metric("episode")
+    for m in ["eval_return", "eval_steps", "best_eval_return"]:
+        wandb.define_metric(m, step_metric="episode")
 
     return run
 
@@ -318,13 +336,7 @@ def _run_eval_episode(
 
             obs_np = next_obs_np
 
-            # collect a render frame if available
-            try:
-                frame = env.render()
-            except Exception:
-                frame = None
-            if frame is not None:
-                trace_frames.append(frame)
+            trace_frames.append(env.render())
 
     trace = {
         "actions": np.stack(trace_actions, axis=0) if len(trace_actions) > 0 else np.empty((0,), dtype=np.int64),
@@ -340,9 +352,9 @@ def train_online(cfg: TrainConfig):
     _set_seed(cfg.seed + dist_ctx.rank)
 
     requested_device = str(cfg.device).lower()
+    if requested_device.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError("device 指定了 CUDA，但当前环境不可用 torch.cuda。")
     use_cuda = requested_device.startswith("cuda") and torch.cuda.is_available()
-    if requested_device.startswith("cuda") and (not torch.cuda.is_available()) and dist_ctx.is_main:
-        print("[WARN] CUDA requested but unavailable, fallback to CPU.")
 
     gpu_ids = list(cfg.gpu_ids) if cfg.gpu_ids else None
     use_data_parallel = False
@@ -360,7 +372,9 @@ def train_online(cfg: TrainConfig):
             if gpu_ids is None:
                 gpu_ids = list(range(n_gpu))
             else:
-                gpu_ids = [i for i in gpu_ids if 0 <= i < n_gpu]
+                invalid = [i for i in gpu_ids if not (0 <= i < n_gpu)]
+                if invalid:
+                    raise ValueError(f"gpu_ids 超出可用范围 [0, {n_gpu - 1}]: {invalid}")
             use_data_parallel = len(gpu_ids) > 1
 
         if use_cuda:
@@ -406,18 +420,12 @@ def train_online(cfg: TrainConfig):
     envs: Dict[str, TODCMARLEnv] = {}
     opts: Dict[str, torch.optim.Optimizer] = {}
 
+    need_train_rgb = (cfg.step_frame_interval > 0) or (
+        cfg.wandb_train_video_every > 0 and cfg.wandb_mode != "disabled"
+    )
     for scheme_name, model in models.items():
         envs[scheme_name] = TODCMARLEnv(
-            {
-                "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
-                # enable in-env rendering during training only if user requested step-frame capture
-                "render_mode": "rgb_array" if cfg.step_frame_interval and cfg.step_frame_interval > 0 else "none",
-                "max_episode_steps": cfg.max_episode_steps,
-                "time_res": cfg.time_res,
-                "step_mode": cfg.step_mode,
-                "enable_dwa_replan": cfg.enable_dwa_replan,
-                "reward": cfg.reward,
-            }
+            _todc_marl_env_dict(cfg, render_mode="rgb_array" if need_train_rgb else "none")
         )
         opts[scheme_name] = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
@@ -444,6 +452,17 @@ def train_online(cfg: TrainConfig):
             ep_entropy = 0.0
             ep_steps = 0
 
+            record_train_video = (
+                run is not None
+                and cfg.wandb_train_video_every > 0
+                and (ep % cfg.wandb_train_video_every == 0)
+            )
+            prev_render_mode = env.render_mode
+            train_video_frames: List[np.ndarray] = []
+            if record_train_video:
+                env.render_mode = "rgb_array"
+                train_video_frames.append(env.render())
+
             # 外层：一次 env.step(action) = 一次 RL 步；内层按 main0319：update -> step_geometry -> check。
             # 全局仿真时间 t_all 在 infos["global_t_all"]；路径段执行时间 t 在 infos["path_exec_t"]（每 replan 后 t 归零）。
             while (not done) and (not trunc):
@@ -464,25 +483,7 @@ def train_online(cfg: TrainConfig):
                 reward_vec = np.array([env_rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
                 reward_t = _to_tensor(reward_vec, device)
 
-                # Use reward breakdown computed by the environment (avoid recomputing here)
-                try:
-                    reward_details = infos.get("_reward_details_all")
-                except Exception:
-                    reward_details = None
-
-                # fallback to minimal per-agent map if env did not provide details
-                if reward_details is None:
-                    reward_details = {
-                        f"p_{i}": {
-                            "r_qual": float(env_rewards[f"p_{i}"]),
-                            "r_global": 0.0,
-                            "r_safe": 0.0,
-                            "r_time": 0.0,
-                        }
-                        for i in range(env.num_P)
-                    }
-                    reward_details["terminal_bonus"] = 0.0
-                    reward_details["terminal_penalty"] = 0.0
+                reward_details = infos["_reward_details_all"]
 
                 done = bool(terms["__all__"])
                 trunc = bool(truncs["__all__"])
@@ -512,16 +513,16 @@ def train_online(cfg: TrainConfig):
 
                 if run is not None:
                     mean_delta_t_all = float(np.mean([infos[f"p_{i}"]["delta_t_all"] for i in range(env.num_P)]))
-                    g_t_all = float(infos.get("global_t_all", infos[f"p_{0}"]["t_all"]))
-                    path_t = float(infos.get("path_exec_t", infos[f"p_{0}"]["t"]))
+                    g_t_all = float(infos["global_t_all"])
+                    path_t = float(infos["path_exec_t"])
                     replanned = float(np.mean([float(infos[f"p_{i}"]["replanned"]) for i in range(env.num_P)]))
                     # step级奖励分项统计
                     r_qual = np.mean([reward_details[f"p_{i}"]["r_qual"] for i in range(env.num_P)])
                     r_global = np.mean([reward_details[f"p_{i}"]["r_global"] for i in range(env.num_P)])
                     r_safe = np.mean([reward_details[f"p_{i}"]["r_safe"] for i in range(env.num_P)])
                     r_time = np.mean([reward_details[f"p_{i}"]["r_time"] for i in range(env.num_P)])
-                    terminal_bonus = reward_details.get("terminal_bonus", 0.0)
-                    terminal_penalty = reward_details.get("terminal_penalty", 0.0)
+                    terminal_bonus = reward_details["terminal_bonus"]
+                    terminal_penalty = reward_details["terminal_penalty"]
                     run.log(
                         {
                             f"{scheme_name}/step_reward": float(reward_t.mean().item()),
@@ -549,18 +550,30 @@ def train_online(cfg: TrainConfig):
                 if run is not None and cfg.step_frame_interval and cfg.step_frame_interval > 0 and (
                     global_step % cfg.step_frame_interval == 0
                 ):
-                    try:
-                        frame = env.render()
-                    except Exception:
-                        frame = None
-                    if frame is not None:
-                        try:
-                            run.log({f"{scheme_name}/step_image": wandb.Image(frame, caption=f"step {global_step}"), "global_step": global_step})
-                        except Exception:
-                            # best-effort: don't crash training on logging issues
-                            pass
+                    import wandb as _wandb
+
+                    frame = env.render()
+                    run.log(
+                        {
+                            f"{scheme_name}/step_image": _wandb.Image(frame, caption=f"step {global_step}"),
+                            "global_step": global_step,
+                        }
+                    )
+
+                if record_train_video:
+                    train_video_frames.append(env.render())
 
                 obs_np = next_obs_np
+
+            if record_train_video:
+                env.render_mode = prev_render_mode
+                _wandb_log_video(
+                    run,
+                    f"{scheme_name}/train_episode_video",
+                    train_video_frames,
+                    cfg.train_wandb_video_fps,
+                    ep,
+                )
 
             # 统计本episode资产受损次数
             asset_breach_count = sum([infos[f"p_{i}"]["asset_breached"] for i in range(env.num_P)])
@@ -572,7 +585,7 @@ def train_online(cfg: TrainConfig):
                 "value_loss": ep_value_loss / max(1, ep_steps),
                 "entropy": ep_entropy / max(1, ep_steps),
                 "asset_breach_count": asset_breach_count,
-                "final_global_t_all": float(infos.get("global_t_all", infos[f"p_{0}"]["t_all"])),
+                "final_global_t_all": float(infos["global_t_all"]),
             }
             history[scheme_name].append(ep_stats)
 
@@ -591,17 +604,7 @@ def train_online(cfg: TrainConfig):
                 )
 
             if dist_ctx.is_main and cfg.eval_interval > 0 and (ep % cfg.eval_interval) == 0:
-                eval_env = TODCMARLEnv(
-                    {
-                        "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
-                        "render_mode": "rgb_array",
-                        "max_episode_steps": cfg.max_episode_steps,
-                        "time_res": cfg.time_res,
-                        "step_mode": cfg.step_mode,
-                        "enable_dwa_replan": cfg.enable_dwa_replan,
-                        "reward": cfg.reward,
-                    }
-                )
+                eval_env = TODCMARLEnv(_todc_marl_env_dict(cfg, render_mode="rgb_array"))
 
                 eval_returns = []
                 eval_steps = []
@@ -629,29 +632,14 @@ def train_online(cfg: TrainConfig):
                     trace_path = os.path.join(scheme_dir, f"episode_{ep:05d}.npz")
                     np.savez_compressed(trace_path, **last_trace)
 
-                # Upload eval video to wandb (best-effort)
                 if run is not None and last_frames is not None and len(last_frames) > 0:
-                    try:
-                        # write frames to a temporary mp4 file
-                        tmpf = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                        tmpf.close()
-                        with imageio.get_writer(tmpf.name, fps=cfg.eval_video_fps, codec="libx264") as writer:
-                            for fr in last_frames:
-                                # ensure uint8
-                                fr_u8 = (fr.astype(np.uint8) if fr.dtype != np.uint8 else fr)
-                                writer.append_data(fr_u8)
-
-                        try:
-                            run.log({f"{scheme_name}/eval_video": wandb.Video(tmpf.name, fps=cfg.eval_video_fps, format="mp4"), "episode": ep})
-                        except Exception:
-                            pass
-                        try:
-                            os.remove(tmpf.name)
-                        except Exception:
-                            pass
-                    except Exception:
-                        # ignore video generation errors
-                        pass
+                    _wandb_log_video(
+                        run,
+                        f"{scheme_name}/eval_video",
+                        last_frames,
+                        cfg.eval_video_fps,
+                        ep,
+                    )
 
                 if run is not None:
                     run.log(
@@ -708,6 +696,12 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--allow-dummy-if-missing", type=_str2bool, default=True)
     parser.add_argument("--enable-dwa-replan", type=_str2bool, default=True)
     parser.add_argument("--reward-json", type=str, default=None, help="Inline JSON for reward config")
+    parser.add_argument(
+        "--env-json",
+        type=str,
+        default=None,
+        help="Inline JSON merged into TODCMARLEnv config (overrides YAML env), e.g. '{\"collision_dist\": 30}'",
+    )
     parser.add_argument("--wandb-project", type=str, default="dubins-marl-online")
     parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--wandb-run-name", type=str, default=None)
@@ -721,6 +715,13 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--replay-dir", type=str, default="output/eval_traces")
     parser.add_argument("--step-frame-interval", type=int, default=1, help="Upload a training step image every N global steps (0 to disable)")
     parser.add_argument("--eval-video-fps", type=int, default=10, help="FPS for eval video uploaded to wandb")
+    parser.add_argument(
+        "--wandb-train-video-every",
+        type=int,
+        default=0,
+        help="Every N training episodes log a full rollout video to wandb (0 to disable)",
+    )
+    parser.add_argument("--train-wandb-video-fps", type=int, default=10, help="FPS for training episode videos on wandb")
 
     # Apply file/config defaults after all arguments are declared so they override add_argument's built-in defaults
     if defaults:
@@ -751,24 +752,15 @@ def _parse_args() -> TrainConfig:
 
     parser = _build_parser(defaults=cfg_defaults)
 
-    # Debug: show the defaults applied to the parser (from YAML)
-    # try:
-    #     print("[DEBUG] cfg_defaults applied to parser:", {k: cfg_defaults.get(k) for k in sorted(cfg_defaults.keys())})
-    # except Exception:
-    #     pass
-
     args = parser.parse_args()
 
-    # Debug: print some parsed args to verify values came from YAML
-    # try:
-    #     print("[DEBUG] parsed args: device=", args.device, "gpu_ids=", args.gpu_ids, "episodes=", args.episodes)
-    #     print("[DEBUG] parsed args reward:", getattr(args, "reward", None))
-    # except Exception:
-    #     pass
-
-    reward_cfg = getattr(args, "reward", None)
+    reward_cfg = args.reward
     if args.reward_json:
         reward_cfg = json.loads(args.reward_json)
+
+    env_cfg = args.env
+    if args.env_json:
+        env_cfg = json.loads(args.env_json)
 
     return TrainConfig(
         episodes=args.episodes,
@@ -792,6 +784,7 @@ def _parse_args() -> TrainConfig:
         allow_dummy_if_missing=bool(args.allow_dummy_if_missing),
         enable_dwa_replan=bool(args.enable_dwa_replan),
         reward=reward_cfg,
+        env=env_cfg,
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_run_name=args.wandb_run_name,
@@ -805,6 +798,8 @@ def _parse_args() -> TrainConfig:
         replay_dir=args.replay_dir,
         step_frame_interval=args.step_frame_interval,
         eval_video_fps=args.eval_video_fps,
+        wandb_train_video_every=args.wandb_train_video_every,
+        train_wandb_video_fps=args.train_wandb_video_fps,
     )
 
 

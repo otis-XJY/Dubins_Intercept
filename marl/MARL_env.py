@@ -401,7 +401,7 @@ class TODCMARLEnv(gym.Env):
 
     def step(self, action_dict):
         """RL 对外一步。decision 模式内层按 main0319：update -> _advance_from_paths -> _phase_check_decision 循环直至重规划或终止。"""
-        action_weights, action_indices = self._normalize_action(action_dict)
+        action_weights, action_indices, obs_at_action = self._normalize_action(action_dict)
         self.last_action_weights = action_weights
         self.last_action_indices = action_indices
 
@@ -437,7 +437,9 @@ class TODCMARLEnv(gym.Env):
             self.episode_step += 1
             delta_t_all = float(self.t_all) - t_all_before
 
-        rewards, reward_details = self._compute_rewards(action_indices, sim_time_elapsed=delta_t_all)
+        rewards, reward_details = self._compute_rewards(
+            action_indices, sim_time_elapsed=delta_t_all, obs_at_action=obs_at_action
+        )
         asset_breached = self._check_asset_breach()
         self.reward_fn.apply_terminal_rewards(
             rewards,
@@ -476,18 +478,9 @@ class TODCMARLEnv(gym.Env):
                 "decision_step": int(self.decision_step),
                 "step_mode": self.step_mode,
             }
-            # attach per-agent reward breakdown if available
-            try:
-                if reward_details is not None and f"p_{i}" in reward_details:
-                    entry["reward_details"] = reward_details[f"p_{i}"]
-            except Exception:
-                pass
+            entry["reward_details"] = reward_details[f"p_{i}"]
             infos[f"p_{i}"] = entry
-        # expose full reward breakdown mapping for external use (logging, analysis)
-        try:
-            infos["_reward_details_all"] = reward_details
-        except Exception:
-            infos["_reward_details_all"] = None
+        infos["_reward_details_all"] = reward_details
         # 全局仿真时间 t_all / 路径段执行时间 t：训练脚本主记 t_all，env 内层终止条件用 t（见 decision 内层 while）
         infos["global_t_all"] = float(self.t_all)
         infos["path_exec_t"] = float(self.t)
@@ -758,13 +751,10 @@ class TODCMARLEnv(gym.Env):
             return False, True
         need_replan = False
         if self.enable_dwa_replan:
-            try:
-                # pos_e, path_pre = self._dwa_pos_e_and_path_pre()
-                min_dists, _ = obtainDWAprePath(self.PosE, self.PathEpre, self.E_PreRef)
-                # TODO:测试这个数值
-                need_replan = not bool(np.all(min_dists <= 50))
-            except Exception:
-                need_replan = True
+            # pos_e, path_pre = self._dwa_pos_e_and_path_pre()
+            min_dists, _ = obtainDWAprePath(self.PosE, self.PathEpre, self.E_PreRef)
+            # TODO:测试这个数值
+            need_replan = not bool(np.all(min_dists <= 50))
         return need_replan, False
 
 # TODO: 为什么返回新增捕获数
@@ -791,28 +781,22 @@ class TODCMARLEnv(gym.Env):
         """
         if self._path_e2tp_cache is None:
             return
-        try:
-            obs = self._build_obs()
-            self._sync_dynamic_k(obs)
-            mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
-            assigned_rows = []
-            for pid in self.UnCapPidNew:
-                subset = self.ICFinalActionCandidates[self.ICFinalActionCandidates[:, 12].astype(int) == pid]
-                n = int(subset.shape[0])
-                idx = int(action_indices[pid])
-                if idx >= n:
-                    idx = n - 1
-                if idx < 0:
-                    idx = 0
-                if mask[pid, idx] <= 0:
-                    valid = np.where(mask[pid, :n] > 0)[0]
-                    idx = int(valid[0]) if valid.size > 0 else 0
-                assigned_rows.append(subset[idx])
-            assigned = np.vstack(assigned_rows)
-            self.ICFinalAction = assigned.copy()
-            self._apply_paths_from_assigned_rows(assigned)
-        except Exception:
-            self._apply_hungarian_and_paths()
+        obs = self._build_obs()
+        self._sync_dynamic_k(obs)
+        mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
+        assigned_rows = []
+        for pid in self.UnCapPidNew:
+            subset = self.ICFinalActionCandidates[self.ICFinalActionCandidates[:, 12].astype(int) == pid]
+            n = int(subset.shape[0])
+            idx = int(action_indices[pid])
+            if idx < 0 or idx >= n:
+                raise IndexError(f"action index {idx} out of range for pid {pid} (n_candidates={n})")
+            if mask[pid, idx] <= 0:
+                raise ValueError(f"invalid action: mask[{pid}, {idx}] is zero for masked candidate")
+            assigned_rows.append(subset[idx])
+        assigned = np.vstack(assigned_rows)
+        self.ICFinalAction = assigned.copy()
+        self._apply_paths_from_assigned_rows(assigned)
 
     def _pairwise_dist(self):
         pp = self.PosP[:, :2]
@@ -823,29 +807,23 @@ class TODCMARLEnv(gym.Env):
 
         # 尝试使用 IsoMap 中的 IsoPos（与 _extract_iso_points 行为一致）
         if hasattr(self, "IsoMap_i_tt_P2Iso") and row.shape[0] > 6:
-            try:
-                # 常见布局（见 obtainRLOutput）: te=0, tp=1, IsoIdxE=4, IsoIdxP=5, eid=11, pid=12
-                tp_idx = int(row[1]) if row.shape[0] > 1 else 0
-                iso_idx = int(row[5]) if row.shape[0] > 5 else (int(row[4]) if row.shape[0] > 4 else 0)
+            # 常见布局（见 obtainRLOutput）: te=0, tp=1, IsoIdxE=4, IsoIdxP=5, eid=11, pid=12
+            tp_idx = int(row[1]) if row.shape[0] > 1 else 0
+            iso_idx = int(row[5]) if row.shape[0] > 5 else (int(row[4]) if row.shape[0] > 4 else 0)
 
-                cols = getattr(self.obs_generator, "cols", None)
-                if cols is not None:
-                    pid_ref = int(row[cols.pid_ref]) if row.shape[0] > cols.pid_ref else pid
-                else:
-                    pid_ref = int(row[12]) if row.shape[0] > 12 else pid
+            cols = self.obs_generator.cols
+            pid_ref = int(row[cols.pid_ref]) if row.shape[0] > cols.pid_ref else pid
 
-                iso_obj = self.IsoMap_i_tt_P2Iso[pid_ref][tp_idx]
-                if iso_obj is not None and hasattr(iso_obj, "IsoPos") and iso_obj.IsoPos is not None:
-                    iso_pos = np.asarray(iso_obj.IsoPos)
-                    if iso_pos.ndim == 2:
-                        iso_idx = max(0, min(iso_idx, iso_pos.shape[1] - 1))
-                        return float(iso_pos[0, iso_idx]), float(iso_pos[1, iso_idx]), float(iso_pos[2, iso_idx])
-            except Exception:
-                pass
+            iso_obj = self.IsoMap_i_tt_P2Iso[pid_ref][tp_idx]
+            if iso_obj is not None and hasattr(iso_obj, "IsoPos") and iso_obj.IsoPos is not None:
+                iso_pos = np.asarray(iso_obj.IsoPos)
+                if iso_pos.ndim == 2:
+                    iso_idx = max(0, min(iso_idx, iso_pos.shape[1] - 1))
+                    return float(iso_pos[0, iso_idx]), float(iso_pos[1, iso_idx]), float(iso_pos[2, iso_idx])
 
         # 回退：使用敌方位置与朝向（兼容老格式 / 无 IsoMap 情况）
-        cols = getattr(self.obs_generator, "cols", None)
-        if cols is not None and row.shape[0] > cols.eid_ref:
+        cols = self.obs_generator.cols
+        if row.shape[0] > cols.eid_ref:
             eid = int(row[cols.eid_ref])
         else:
             eid = int(row[11]) if row.shape[0] > 11 else pid % self.num_E
@@ -868,10 +846,11 @@ class TODCMARLEnv(gym.Env):
             pairs_realE2P=self.pairs_realE2P,
         )
 
-    def _normalize_action(self, action_dict) -> Tuple[np.ndarray, np.ndarray]:
-        """解析策略输出：返回 (one-hot 权重, 每智能体离散索引)。
+    def _normalize_action(self, action_dict) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+        """解析策略输出：返回 (one-hot 权重, 每智能体离散索引, 决策时刻观测快照)。
 
         训练脚本通常传入 **采样后的索引** ``(num_P,)`` int；亦兼容 logits/概率矩阵。
+        快照用于计奖：仿真内层可能重规划并改变候选数 K，必须与选动作时的 mask 一致。
         """
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
@@ -916,48 +895,36 @@ class TODCMARLEnv(gym.Env):
         for i in range(self.num_P):
             valid_idx = np.where(mask[i] > 0)[0]
             if valid_idx.size == 0:
-                norm[i, 0] = 1.0
-                continue
+                raise ValueError(f"no valid action candidates for pursuer {i} (self_pts_mask row is all zero)")
             sel = int(idx[i])
             if sel < 0 or sel >= k_curr or mask[i, sel] <= 0:
-                sel = int(valid_idx[0])
+                raise ValueError(f"invalid normalized action index {sel} for pursuer {i} (k={k_curr})")
             norm[i, sel] = 1.0
-        return norm, idx
+        return norm, idx, obs
 
-    def _compute_rewards(self, action_indices: np.ndarray, sim_time_elapsed: float):
-        """`action_indices` 为形状 (num_P,) 的离散候选下标，与 `TODCRewardFunction.compute_step_rewards` 的 ndim==1 分支一致。"""
+    def _compute_rewards(
+        self,
+        action_indices: np.ndarray,
+        sim_time_elapsed: float,
+        obs_at_action: Dict[str, np.ndarray],
+    ):
+        """`action_indices` 相对于 ``obs_at_action`` 中的候选掩码；几何类项用当前态势。"""
         curr_min_dist = self._pairwise_dist().min(axis=1)
-        obs = self._build_obs()
+        curr_obs = self._build_obs()
+        obs = dict(curr_obs)
+        for key in ("reward_nodes", "self_pts_mask", "self_pts"):
+            obs[key] = obs_at_action[key]
         sd = float(self.sim_dt)
-        # Request detailed breakdown from reward function so env can expose it via infos
-        try:
-            rewards_or_pair = self.reward_fn.compute_step_rewards(
-                actions=action_indices,
-                obs=obs,
-                curr_min_dist=curr_min_dist,
-                last_min_dist=self.last_min_dist,
-                num_p=self.num_P,
-                sim_time_elapsed=float(sim_time_elapsed),
-                sim_dt=sd,
-                return_details=True,
-            )
-            # compute_step_rewards may return (rewards, details) when return_details=True
-            if isinstance(rewards_or_pair, tuple) and len(rewards_or_pair) == 2:
-                rewards, details = rewards_or_pair
-            else:
-                rewards = rewards_or_pair
-                details = None
-        except Exception:
-            rewards = self.reward_fn.compute_step_rewards(
-                actions=action_indices,
-                obs=obs,
-                curr_min_dist=curr_min_dist,
-                last_min_dist=self.last_min_dist,
-                num_p=self.num_P,
-                sim_time_elapsed=float(sim_time_elapsed),
-                sim_dt=sd,
-            )
-            details = None
+        rewards, details = self.reward_fn.compute_step_rewards(
+            actions=action_indices,
+            obs=obs,
+            curr_min_dist=curr_min_dist,
+            last_min_dist=self.last_min_dist,
+            num_p=self.num_P,
+            sim_time_elapsed=float(sim_time_elapsed),
+            sim_dt=sd,
+            return_details=True,
+        )
 
         self.last_min_dist = curr_min_dist.copy()
         # store last reward details for external inspection
@@ -984,13 +951,15 @@ class TODCMARLEnv(gym.Env):
         return np.linalg.norm(diff, axis=2)
 
     def render(self):
+        """与 ``main/main0319.py`` 563–632 行一致：地图 + Evader 起点 + 未捕获对的姿态/预测轨迹 + DWA BestPaths + 灰色真实历史轨迹。"""
         if self.render_mode == "none":
             return None
 
         if self.fig is None or self.ax is None:
             self.fig, self.ax = plt.subplots(figsize=(12, 10))
 
-        self.ax.cla()
+        ax = self.ax
+        ax.cla()
         Draw_map(
             self.PStart_Point,
             self.Trans_Point,
@@ -999,50 +968,126 @@ class TODCMARLEnv(gym.Env):
             self.sure,
             self.obs_no_circle,
             self.obs_no_circle_in,
-            ax=self.ax,
+            ax=ax,
         )
 
         color_map = mpl.colormaps["tab20"]
-        for idx in range(self.num_E):
-            color_p = color_map((idx * 2) % 20)
-            color_e = color_map((idx * 2 + 1) % 20)
+        ax.scatter(
+            self.Evader[:, 0],
+            self.Evader[:, 1],
+            c="gray",
+            marker="d",
+            s=20,
+            alpha=0.5,
+            label="Evader Start",
+        )
 
-            self.ax.plot(self.PosP[idx, 0], self.PosP[idx, 1], "o", color=color_p, markersize=8, markeredgecolor="w")
-            self.ax.quiver(
-                self.PosP[idx, 0],
-                self.PosP[idx, 1],
-                80 * np.cos(self.PosP[idx, 2]),
-                80 * np.sin(self.PosP[idx, 2]),
-                color=color_p,
-                angles="xy",
-                scale_units="xy",
-                scale=1,
-                width=0.004,
-            )
-            self.ax.plot(self.PosE[idx, 0], self.PosE[idx, 1], "d", color=color_e, markersize=8, markeredgecolor="w")
+        n_active = len(self.UnCapEidNew)
+        if n_active > 0:
+            if self.PosP.shape[0] != n_active or self.PosE.shape[0] != n_active:
+                raise RuntimeError(
+                    f"render: PosP/PosE 行数应与未捕获对数一致， got PosP={self.PosP.shape[0]}, "
+                    f"PosE={self.PosE.shape[0]}, len(UnCapEidNew)={n_active}"
+                )
+            if len(self.PathEpre) != n_active:
+                raise RuntimeError(
+                    f"render: PathEpre 长度应为 {n_active}, got {len(self.PathEpre)}"
+                )
+            _, best_paths = obtainDWAprePath(self.PosE, self.PathEpre, self.E_PreRef)
+            if len(best_paths) != n_active:
+                raise RuntimeError(
+                    f"obtainDWAprePath 返回 BestPaths 长度 {len(best_paths)} != {n_active}"
+                )
 
-            self.ax.plot(self.PathPtrue[idx][0, :], self.PathPtrue[idx][1, :], "-", color="gray", linewidth=2, alpha=0.4)
-            len_e = min(int(self.t_all * self.v_E), self.PathE2Val_true[idx].shape[0] - 1)
-            self.ax.plot(
-                self.PathE2Val_true[idx][: len_e + 1, 0],
-                self.PathE2Val_true[idx][: len_e + 1, 1],
+            for idx, eid in enumerate(self.UnCapEidNew):
+                eid = int(eid)
+                pid = int(self.UnCapPidNew[idx])
+                color_p = color_map((idx * 2) % 20)
+                color_e = color_map((idx * 2 + 1) % 20)
+
+                ax.plot(
+                    self.PosP[idx, 0],
+                    self.PosP[idx, 1],
+                    "o",
+                    color=color_p,
+                    markersize=8,
+                    markeredgecolor="w",
+                    alpha=1,
+                )
+                ax.quiver(
+                    self.PosP[idx, 0],
+                    self.PosP[idx, 1],
+                    150 * np.cos(self.PosP[idx, 2]),
+                    150 * np.sin(self.PosP[idx, 2]),
+                    color=color_p,
+                    angles="xy",
+                    scale_units="xy",
+                    scale=1,
+                    width=0.004,
+                    alpha=0.8,
+                )
+                ax.plot(
+                    self.PosE[idx, 0],
+                    self.PosE[idx, 1],
+                    "d",
+                    color=color_e,
+                    markersize=8,
+                    markeredgecolor="w",
+                    alpha=1,
+                )
+                ax.quiver(
+                    self.PosE[idx, 0],
+                    self.PosE[idx, 1],
+                    150 * np.cos(self.PosE[idx, 2]),
+                    150 * np.sin(self.PosE[idx, 2]),
+                    color=color_e,
+                    angles="xy",
+                    scale_units="xy",
+                    scale=1,
+                    width=0.004,
+                    alpha=0.8,
+                )
+
+                path_p = self.PathP[pid]
+                path_e = self.PathE[eid]
+                ax.plot(path_p[0, :], path_p[1, :], "-", color=color_p, linewidth=2, alpha=1)
+                ax.plot(path_e[0, :], path_e[1, :], "--", color=color_e, linewidth=2, alpha=1)
+
+                bp = best_paths[idx]
+                ax.plot(bp[0, :], bp[1, :], "-", color=color_p, linewidth=2.5, zorder=3)
+
+        len_e_true = int(self.t_all * self.v_E)
+        len_p_true = int(self.t_all * self.v_P)
+        for i_plot in range(len(self.PathE2Val_true)):
+            ax.plot(
+                self.PathE2Val_true[i_plot][:len_e_true, 0],
+                self.PathE2Val_true[i_plot][:len_e_true, 1],
                 "-",
                 color="gray",
-                linewidth=2,
-                alpha=0.4,
+                linewidth=2.5,
+                alpha=0.3,
+                zorder=1,
+            )
+            ax.plot(
+                self.PathPtrue[i_plot][0, :len_p_true],
+                self.PathPtrue[i_plot][1, :len_p_true],
+                "-",
+                color="gray",
+                linewidth=2.5,
+                alpha=0.3,
+                zorder=1,
             )
 
-        self.ax.set_title(f"TODC-MARL Env Time: {self.t_all:.2f}")
-        self.ax.grid(True, linestyle="--", alpha=0.5)
+        ax.set_title(f"Simulation Time: {self.t_all:.2f}")
+        ax.grid(True, linestyle="--", alpha=0.5)
 
         if self.render_mode == "human":
             plt.pause(0.001)
             return None
 
         self.fig.canvas.draw()
-        width, height = self.fig.canvas.get_width_height()
-        frame = np.frombuffer(self.fig.canvas.tostring_rgb(), dtype=np.uint8).reshape(height, width, 3)
-        return frame
+        rgba = np.asarray(self.fig.canvas.buffer_rgba())
+        return rgba[:, :, :3].copy()
 
     def save_random_rollout_video(self, steps: int = 150, output_dir: str = "output") -> str:
         os.makedirs(output_dir, exist_ok=True)

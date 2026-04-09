@@ -263,11 +263,11 @@ class UAVInterceptionNetwork(nn.Module):
         # =====================================================================
         if self.design_mode in ["A", "B"]:
             # Query is e_self[B, 1, D]
-            h_ally = self._apply_mha(self.mha_ally, e_self, e_ally, obs.get("ally_mask"))
-            h_spts = self._apply_mha(self.mha_self_pts, e_self, e_self_pts, obs.get("self_pts_mask"))
-            h_apts = self._apply_mha(self.mha_ally_pts, e_self, e_ally_pts, obs.get("ally_pts_mask"))
-            h_enemy = self._apply_mha(self.mha_enemy, e_self, e_enemy, obs.get("enemy_mask"))
-            h_target = self._apply_mha(self.mha_target, e_self, e_target, obs.get("target_mask"))
+            h_ally = self._apply_mha(self.mha_ally, e_self, e_ally, obs["ally_mask"])
+            h_spts = self._apply_mha(self.mha_self_pts, e_self, e_self_pts, obs["self_pts_mask"])
+            h_apts = self._apply_mha(self.mha_ally_pts, e_self, e_ally_pts, obs["ally_pts_mask"])
+            h_enemy = self._apply_mha(self.mha_enemy, e_self, e_enemy, obs["enemy_mask"])
+            h_target = self._apply_mha(self.mha_target, e_self, e_target, obs["target_mask"])
 
             # Squeeze sequence dim -> [B, D]
             e_self_sq = e_self.squeeze(1)
@@ -313,10 +313,10 @@ class UAVInterceptionNetwork(nn.Module):
             h_self = self._apply_mha(self.mha_self, query=e_self_pts, kv=e_self, mask=None)  #[B, M, D]
             
             # Points query the rest of the environment
-            h_ally = self._apply_mha(self.mha_ally, query=e_self_pts, kv=e_ally, mask=obs.get("ally_mask"))
-            h_apts = self._apply_mha(self.mha_ally_pts, query=e_self_pts, kv=e_ally_pts, mask=obs.get("ally_pts_mask"))
-            h_enemy = self._apply_mha(self.mha_enemy, query=e_self_pts, kv=e_enemy, mask=obs.get("enemy_mask"))
-            h_target = self._apply_mha(self.mha_target, query=e_self_pts, kv=e_target, mask=obs.get("target_mask"))
+            h_ally = self._apply_mha(self.mha_ally, query=e_self_pts, kv=e_ally, mask=obs["ally_mask"])
+            h_apts = self._apply_mha(self.mha_ally_pts, query=e_self_pts, kv=e_ally_pts, mask=obs["ally_pts_mask"])
+            h_enemy = self._apply_mha(self.mha_enemy, query=e_self_pts, kv=e_enemy, mask=obs["enemy_mask"])
+            h_target = self._apply_mha(self.mha_target, query=e_self_pts, kv=e_target, mask=obs["target_mask"])
             
             # Each point now has 5 contextual embeddings from the environment.
             # Concat them along feature dim: [B, M, 6 * D]
@@ -328,11 +328,8 @@ class UAVInterceptionNetwork(nn.Module):
         # ==========================================
         # Action Masking and Probability (通用处理)
         # ==========================================
-        self_pts_mask = obs.get("self_pts_mask")
-        if self_pts_mask is not None:
-            masked_logits = logits.masked_fill(~self_pts_mask, -1e9)
-        else:
-            masked_logits = logits
+        self_pts_mask = obs["self_pts_mask"]
+        masked_logits = logits.masked_fill(~self_pts_mask, -1e9)
 
         probs = torch.softmax(masked_logits, dim=-1)
         best_candidate_idx = torch.argmax(probs, dim=-1)
@@ -341,16 +338,14 @@ class UAVInterceptionNetwork(nn.Module):
         # Critic (Global Value Estimation - 保持一致)
         # ==========================================
         def safe_mean(tensor, mask):
-            if mask is None:
-                return tensor.mean(dim=1)
             mask_float = mask.unsqueeze(-1).float()
             return (tensor * mask_float).sum(dim=1) / mask_float.sum(dim=1).clamp_min(1.0)
 
-        e_ally_pool = safe_mean(e_ally, obs.get("ally_mask"))
-        e_spts_pool = safe_mean(e_self_pts, obs.get("self_pts_mask"))
-        e_apts_pool = safe_mean(e_ally_pts, obs.get("ally_pts_mask"))
-        e_enemy_pool = safe_mean(e_enemy, obs.get("enemy_mask"))
-        e_target_pool = safe_mean(e_target, obs.get("target_mask"))
+        e_ally_pool = safe_mean(e_ally, obs["ally_mask"])
+        e_spts_pool = safe_mean(e_self_pts, obs["self_pts_mask"])
+        e_apts_pool = safe_mean(e_ally_pts, obs["ally_pts_mask"])
+        e_enemy_pool = safe_mean(e_enemy, obs["enemy_mask"])
+        e_target_pool = safe_mean(e_target, obs["target_mask"])
         e_self_sq = e_self.squeeze(1)
 
         critic_input = torch.cat([e_self_sq, e_ally_pool, e_spts_pool, e_apts_pool, e_enemy_pool, e_target_pool], dim=-1)

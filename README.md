@@ -30,11 +30,14 @@
 4. [marl/models.py](marl/models.py)
 : 三种策略网络结构（A/B/C）与统一命名、构建接口。
 
-5. [marl/train_online.py](marl/train_online.py)
+5. [marl/train_online0325.py](marl/train_online0325.py)
 : 在线训练入口，支持单机、DataParallel、多进程 DDP（torchrun）、W&B、配置文件、评估与 best 保存。
 
 6. [configs/train_online.example.yaml](configs/train_online.example.yaml)
 : 训练配置样例。
+
+7. [docs/MARL_OVERVIEW.md](docs/MARL_OVERVIEW.md)
+: MARL 架构解读、I/O 与模型侧风险说明（与默认训练入口 `marl.train_online0325` 一致）。
 
 ---
 
@@ -49,7 +52,7 @@
 - 前提：在配置文件中启用 W&B（`wandb_mode: online`），并设置 `wandb_project`、`wandb_entity`（可选）和 `wandb_run_name`（可选）。推荐以包方式运行训练：
 
 ```bash
-python -m marl.train_online --config configs/train_online0324.yaml
+python -m marl.train_online0325 --config configs/train_online0324.yaml
 ```
 
 - 启动后：控制台会输出当前 Run 的链接，或在浏览器打开：
@@ -295,7 +298,7 @@ python -m marl.train_online --config configs/train_online0324.yaml
 
 ## 9. 训练系统（Online Trainer）
 
-实现文件：[marl/train_online.py](marl/train_online.py)。
+实现文件：[marl/train_online0325.py](marl/train_online0325.py)。
 
 ### 9.1 训练算法
 
@@ -396,27 +399,27 @@ DDP 下注意：
 
 使用配置文件：
 
-1. `python -m marl.train_online --config configs/train_online.example.yaml`
+1. `python -m marl.train_online0325 --config configs/train_online.example.yaml`
 
 覆盖关键参数示例：
 
-1. `python -m marl.train_online --config configs/train_online.example.yaml --episodes 500 --wandb-mode online`
+1. `python -m marl.train_online0325 --config configs/train_online.example.yaml --episodes 500 --wandb-mode online`
 
 单机多卡 DataParallel 示例：
 
-1. `python -m marl.train_online --config configs/train_online.example.yaml --device cuda:0 --multi-gpu true --gpu-ids 0,1,2,3`
+1. `python -m marl.train_online0325 --config configs/train_online.example.yaml --device cuda:0 --multi-gpu true --gpu-ids 0,1,2,3`
 
 DDP（torchrun）4 卡示例：
 
-1. `torchrun --standalone --nproc_per_node=4 -m marl.train_online --config configs/train_online.example.yaml --distributed true --ddp-backend nccl`
+1. `torchrun --standalone --nproc_per_node=4 -m marl.train_online0325 --config configs/train_online.example.yaml --distributed true --ddp-backend nccl`
 
 DDP（torchrun）8 卡示例：
 
-1. `torchrun --standalone --nproc_per_node=8 -m marl.train_online --config configs/train_online.example.yaml --distributed true --ddp-backend nccl`
+1. `torchrun --standalone --nproc_per_node=8 -m marl.train_online0325 --config configs/train_online.example.yaml --distributed true --ddp-backend nccl`
 
 DDP 同时覆盖奖励参数示例：
 
-1. `torchrun --standalone --nproc_per_node=8 -m marl.train_online --config configs/train_online.example.yaml --distributed true --reward-json '{"dist_progress_scale":0.08,"entropy_scale":0.05,"capture_bonus":120}'`
+1. `torchrun --standalone --nproc_per_node=8 -m marl.train_online0325 --config configs/train_online.example.yaml --distributed true --reward-json '{"dist_progress_scale":0.08,"entropy_scale":0.05,"capture_bonus":120}'`
 
 ---
 
@@ -448,7 +451,7 @@ DDP 同时覆盖奖励参数示例：
 
 ### 12.4 改训练算法
 
-优先改 [marl/train_online.py](marl/train_online.py)：
+优先改 [marl/train_online0325.py](marl/train_online0325.py)：
 
 1. 从单步 A2C 升级到 n-step GAE。
 2. 增加 PPO clip 目标与 minibatch。
@@ -457,7 +460,7 @@ DDP 同时覆盖奖励参数示例：
 
 ### 12.5 改观测与动作
 
-优先改 [marl/obs_generator.py](marl/obs_generator.py) 与 [marl/train_online.py](marl/train_online.py)：
+优先改 [marl/obs_generator.py](marl/obs_generator.py) 与 [marl/train_online0325.py](marl/train_online0325.py)：
 
 1. 给候选点加入更多几何特征（障碍风险、视线代价等）。
 2. 增加对 ally/enemy 的相对坐标编码。

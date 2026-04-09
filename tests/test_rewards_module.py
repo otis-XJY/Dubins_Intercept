@@ -15,6 +15,9 @@ def test_reward_module_dist_progress_and_sim_time():
     obs = {
         "self_pts": np.zeros((2, 4, 8), dtype=np.float32),
         "self_pts_mask": np.ones((2, 4), dtype=bool),
+        "reward_nodes": np.zeros((2, 4, 8), dtype=np.float32),
+        "self_uav": np.zeros((2, 1, 3), dtype=np.float32),
+        "enemies": np.zeros((2, 1, 3), dtype=np.float32),
     }
     actions = np.zeros((2, 4), dtype=np.float32)
     actions[:, 0] = 1.0
