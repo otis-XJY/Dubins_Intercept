@@ -60,7 +60,7 @@ ddp_find_unused_parameters: false
 # true 且非 DDP 时，对多块 GPU 使用 DataParallel（需 gpu_ids 多于 1 才真正并行）
 multi_gpu: true
 # 使用的 GPU 编号：YAML 里可写整数 1 或字符串 "0,1"；与命令行 --gpu-ids 一致
-gpu_ids: 1
+gpu_ids: 0
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:

@@ -11,7 +11,7 @@
             "name": "Python: debug marl.train_online0325",
             "type": "debugpy",
             "request": "launch",
-            "python": "/home/xujunyi/anaconda3/envs/dubins/bin/python",
+            "python": "/home/walle/miniforge3/envs/dubins_intercept/bin/python",
             "module": "marl.train_online0325",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
