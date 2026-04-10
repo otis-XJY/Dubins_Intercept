@@ -1,3 +1,7 @@
+"""在线 MAPPO 训练入口：多方案并行、可选 W&B、检查点与评估。
+
+配置通过 YAML/CLI 注入 ``TrainConfig``；环境参数放在 ``env`` 字典（含 ``obs.ally_perception_radius`` 等）。
+"""
 import argparse
 import sys
 import json
@@ -15,10 +19,13 @@ import imageio
 import tempfile
 
 from marl import TODCMARLEnv, build_actor_critic_schemes
+from marl.mappo import compute_gae, ppo_minibatch_update
 
 
 @dataclass
 class TrainConfig:
+    """训练超参与环境/env 片段合并规则；``env`` 会传入 ``TODCMARLEnv``。"""
+
     episodes: int = 100
     max_episode_steps: int = 200
     gamma: float = 0.99
@@ -37,8 +44,12 @@ class TrainConfig:
     schemes: Optional[List[str]] = None
     time_res: float = 1.0
     step_mode: str = "decision"
-    allow_dummy_if_missing: bool = True
     enable_dwa_replan: bool = True
+    # MAPPO
+    ppo_clip: float = 0.2
+    ppo_epochs: int = 4
+    gae_lambda: float = 0.95
+    ppo_minibatch_size: int = 32
     reward: Optional[Dict] = None
     wandb_project: str = "dubins-marl-online"
     wandb_entity: Optional[str] = None
@@ -65,7 +76,6 @@ def _todc_marl_env_dict(cfg: TrainConfig, *, render_mode: str) -> Dict:
     if cfg.env is not None and not isinstance(cfg.env, dict):
         raise TypeError(f"TrainConfig.env must be dict or None, got {type(cfg.env)}")
     out: Dict = {
-        "allow_dummy_if_missing": cfg.allow_dummy_if_missing,
         "max_episode_steps": cfg.max_episode_steps,
         "time_res": cfg.time_res,
         "step_mode": cfg.step_mode,
@@ -195,18 +205,21 @@ def _to_tensor(x: np.ndarray, device: torch.device, dtype=torch.float32):
 
 
 def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[str, torch.Tensor]:
+    """将环境 numpy 观测转为 GPU 张量；键集与 ``UAVInterceptionNetwork`` 一致。"""
     required_keys = {
         "self_uav",
-        "ally_uavs",
+        "allies_local",
+        "enemy_assigned_self",
+        "enemy_assigned_per_ally",
+        "asset_target_self",
+        "asset_target_per_ally",
         "self_pts",
         "ally_pts",
-        "enemies",
-        "targets",
         "ally_mask",
+        "enemy_self_mask",
+        "ally_enemy_mask",
         "self_pts_mask",
         "ally_pts_mask",
-        "enemy_mask",
-        "target_mask",
     }
     missing = [k for k in required_keys if k not in obs]
     if missing:
@@ -214,16 +227,18 @@ def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[s
 
     return {
         "self_uav": _to_tensor(np.asarray(obs["self_uav"], dtype=np.float32), device),
-        "ally_uavs": _to_tensor(np.asarray(obs["ally_uavs"], dtype=np.float32), device),
+        "allies_local": _to_tensor(np.asarray(obs["allies_local"], dtype=np.float32), device),
+        "enemy_assigned_self": _to_tensor(np.asarray(obs["enemy_assigned_self"], dtype=np.float32), device),
+        "enemy_assigned_per_ally": _to_tensor(np.asarray(obs["enemy_assigned_per_ally"], dtype=np.float32), device),
+        "asset_target_self": _to_tensor(np.asarray(obs["asset_target_self"], dtype=np.float32), device),
+        "asset_target_per_ally": _to_tensor(np.asarray(obs["asset_target_per_ally"], dtype=np.float32), device),
         "self_pts": _to_tensor(np.asarray(obs["self_pts"], dtype=np.float32), device),
         "ally_pts": _to_tensor(np.asarray(obs["ally_pts"], dtype=np.float32), device),
-        "enemies": _to_tensor(np.asarray(obs["enemies"], dtype=np.float32), device),
-        "targets": _to_tensor(np.asarray(obs["targets"], dtype=np.float32), device),
         "ally_mask": _to_tensor(np.asarray(obs["ally_mask"], dtype=bool), device, dtype=torch.bool),
+        "enemy_self_mask": _to_tensor(np.asarray(obs["enemy_self_mask"], dtype=bool), device, dtype=torch.bool),
+        "ally_enemy_mask": _to_tensor(np.asarray(obs["ally_enemy_mask"], dtype=bool), device, dtype=torch.bool),
         "self_pts_mask": _to_tensor(np.asarray(obs["self_pts_mask"], dtype=bool), device, dtype=torch.bool),
         "ally_pts_mask": _to_tensor(np.asarray(obs["ally_pts_mask"], dtype=bool), device, dtype=torch.bool),
-        "enemy_mask": _to_tensor(np.asarray(obs["enemy_mask"], dtype=bool), device, dtype=torch.bool),
-        "target_mask": _to_tensor(np.asarray(obs["target_mask"], dtype=bool), device, dtype=torch.bool),
     }
 
 
@@ -302,6 +317,7 @@ def _run_eval_episode(
     env: TODCMARLEnv,
     device: torch.device,
 ):
+    """贪心评估一回合：argmax 动作、累计回报与步数，并可选收集轨迹供日志/可视化。"""
     model.eval()
     obs_np, _ = env.reset()
     done = False
@@ -348,6 +364,7 @@ def _run_eval_episode(
 
 
 def train_online(cfg: TrainConfig):
+    """主训练循环：按 scheme 建 env/模型/优化器，rollout + GAE + PPO，周期性评估与保存检查点。"""
     dist_ctx = _setup_distributed(cfg)
     _set_seed(cfg.seed + dist_ctx.rank)
 
@@ -463,60 +480,51 @@ def train_online(cfg: TrainConfig):
                 env.render_mode = "rgb_array"
                 train_video_frames.append(env.render())
 
+            # MAPPO：整段 episode 为一条 rollout，再 GAE + PPO 更新
+            unwrap = model.module if hasattr(model, "module") else model
+            ro_obs: List[Dict[str, np.ndarray]] = []
+            ro_act: List[np.ndarray] = []
+            ro_logp: List[np.ndarray] = []
+            ro_rew: List[np.ndarray] = []
+            ro_val: List[np.ndarray] = []
+            ro_done: List[bool] = []
+
             # 外层：一次 env.step(action) = 一次 RL 步；内层按 main0319：update -> step_geometry -> check。
-            # 全局仿真时间 t_all 在 infos["global_t_all"]；路径段执行时间 t 在 infos["path_exec_t"]（每 replan 后 t 归零）。
             while (not done) and (not trunc):
                 obs_t = _build_model_obs(obs_np, device)
-                out = model(obs_t)
-                logits = out["action_logits"]
-                probs = out["action_probs"]
-                values = out["value"]
-
-                dist = torch.distributions.Categorical(probs=probs)
-                actions = dist.sample()  # [P]
-                logp = dist.log_prob(actions)  # [P]
-                entropy = dist.entropy().mean()
+                with torch.no_grad():
+                    ao = unwrap.actor_forward(obs_t)
+                    probs = ao["action_probs"]
+                    dist_cat = torch.distributions.Categorical(probs=probs)
+                    actions = dist_cat.sample()
+                    logp = dist_cat.log_prob(actions)
+                    vals = unwrap.critic_forward(obs_t)
 
                 next_obs_np, env_rewards, terms, truncs, infos = env.step(actions.detach().cpu().numpy())
-
-                # Use environment-returned rewards for training target
                 reward_vec = np.array([env_rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
-                reward_t = _to_tensor(reward_vec, device)
-
                 reward_details = infos["_reward_details_all"]
 
-                done = bool(terms["__all__"])
-                trunc = bool(truncs["__all__"])
-                not_done = 0.0 if (done or trunc) else 1.0
+                ro_obs.append(obs_np)
+                ro_act.append(actions.detach().cpu().numpy())
+                ro_logp.append(logp.detach().cpu().numpy())
+                ro_rew.append(reward_vec)
+                ro_val.append(vals.detach().cpu().numpy())
+                step_done = bool(terms["__all__"] or truncs["__all__"])
+                ro_done.append(step_done)
 
-                with torch.no_grad():
-                    next_obs_t = _build_model_obs(next_obs_np, device)
-                    next_values = model(next_obs_t)["value"]
-                    target = reward_t + cfg.gamma * not_done * next_values
-
-                advantage = target - values
-                policy_loss = -(logp * advantage.detach()).mean()
-                value_loss = F.mse_loss(values, target)
-                loss = policy_loss + cfg.value_coef * value_loss - cfg.entropy_coef * entropy
-
-                opt.zero_grad()
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                opt.step()
-
-                ep_return += float(reward_t.mean().item())
-                ep_policy_loss += float(policy_loss.item())
-                ep_value_loss += float(value_loss.item())
-                ep_entropy += float(entropy.item())
+                ep_return += float(np.mean(reward_vec))
                 ep_steps += 1
                 global_step += 1
+
+                obs_np = next_obs_np
+                done = bool(terms["__all__"])
+                trunc = bool(truncs["__all__"])
 
                 if run is not None:
                     mean_delta_t_all = float(np.mean([infos[f"p_{i}"]["delta_t_all"] for i in range(env.num_P)]))
                     g_t_all = float(infos["global_t_all"])
                     path_t = float(infos["path_exec_t"])
                     replanned = float(np.mean([float(infos[f"p_{i}"]["replanned"]) for i in range(env.num_P)]))
-                    # step级奖励分项统计
                     r_qual = np.mean([reward_details[f"p_{i}"]["r_qual"] for i in range(env.num_P)])
                     r_global = np.mean([reward_details[f"p_{i}"]["r_global"] for i in range(env.num_P)])
                     r_safe = np.mean([reward_details[f"p_{i}"]["r_safe"] for i in range(env.num_P)])
@@ -525,16 +533,13 @@ def train_online(cfg: TrainConfig):
                     terminal_penalty = reward_details["terminal_penalty"]
                     run.log(
                         {
-                            f"{scheme_name}/step_reward": float(reward_t.mean().item()),
+                            f"{scheme_name}/step_reward": float(np.mean(reward_vec)),
                             f"{scheme_name}/r_qual": r_qual,
                             f"{scheme_name}/r_global": r_global,
                             f"{scheme_name}/r_safe": r_safe,
                             f"{scheme_name}/r_time": r_time,
                             f"{scheme_name}/terminal_bonus": terminal_bonus,
                             f"{scheme_name}/terminal_penalty": terminal_penalty,
-                            f"{scheme_name}/policy_loss": float(policy_loss.item()),
-                            f"{scheme_name}/value_loss": float(value_loss.item()),
-                            f"{scheme_name}/entropy": float(entropy.item()),
                             f"{scheme_name}/delta_t_all": mean_delta_t_all,
                             f"{scheme_name}/global_t_all": g_t_all,
                             f"{scheme_name}/path_exec_t": path_t,
@@ -546,7 +551,6 @@ def train_online(cfg: TrainConfig):
                         }
                     )
 
-                # Step-level visual: upload a frame every cfg.step_frame_interval steps
                 if run is not None and cfg.step_frame_interval and cfg.step_frame_interval > 0 and (
                     global_step % cfg.step_frame_interval == 0
                 ):
@@ -563,7 +567,44 @@ def train_online(cfg: TrainConfig):
                 if record_train_video:
                     train_video_frames.append(env.render())
 
-                obs_np = next_obs_np
+            if len(ro_obs) > 0:
+                rewards_np = np.stack(ro_rew, axis=0)
+                values_np = np.stack(ro_val, axis=0)
+                actions_np = np.stack(ro_act, axis=0)
+                logp_np = np.stack(ro_logp, axis=0)
+                dones_np = np.array(ro_done, dtype=bool)
+
+                with torch.no_grad():
+                    last_obs_t = _build_model_obs(obs_np, device)
+                    last_v = unwrap.critic_forward(last_obs_t).cpu().numpy()
+
+                adv_np, ret_np = compute_gae(
+                    rewards_np,
+                    values_np,
+                    dones_np,
+                    last_v,
+                    gamma=cfg.gamma,
+                    lam=cfg.gae_lambda,
+                )
+                adv_np = (adv_np - adv_np.mean()) / (adv_np.std() + 1e-8)
+
+                ep_policy_loss, ep_value_loss, ep_entropy = ppo_minibatch_update(
+                    model,
+                    opt,
+                    ro_obs,
+                    actions_np,
+                    logp_np,
+                    adv_np,
+                    ret_np,
+                    device,
+                    _build_model_obs,
+                    clip_range=cfg.ppo_clip,
+                    ppo_epochs=cfg.ppo_epochs,
+                    value_coef=cfg.value_coef,
+                    entropy_coef=cfg.entropy_coef,
+                    max_grad_norm=1.0,
+                    minibatch_size=max(1, min(cfg.ppo_minibatch_size, len(ro_obs))),
+                )
 
             if record_train_video:
                 env.render_mode = prev_render_mode
@@ -693,8 +734,11 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--schemes", type=str, nargs="*", default=None)
     parser.add_argument("--time-res", type=float, default=1.0)
     parser.add_argument("--step-mode", type=str, default="decision", choices=["decision", "time"])
-    parser.add_argument("--allow-dummy-if-missing", type=_str2bool, default=True)
     parser.add_argument("--enable-dwa-replan", type=_str2bool, default=True)
+    parser.add_argument("--ppo-clip", type=float, default=0.2)
+    parser.add_argument("--ppo-epochs", type=int, default=4)
+    parser.add_argument("--gae-lambda", type=float, default=0.95)
+    parser.add_argument("--ppo-minibatch-size", type=int, default=32)
     parser.add_argument("--reward-json", type=str, default=None, help="Inline JSON for reward config")
     parser.add_argument(
         "--env-json",
@@ -781,8 +825,11 @@ def _parse_args() -> TrainConfig:
         schemes=args.schemes,
         time_res=args.time_res,
         step_mode=args.step_mode,
-        allow_dummy_if_missing=bool(args.allow_dummy_if_missing),
         enable_dwa_replan=bool(args.enable_dwa_replan),
+        ppo_clip=float(args.ppo_clip),
+        ppo_epochs=int(args.ppo_epochs),
+        gae_lambda=float(args.gae_lambda),
+        ppo_minibatch_size=int(args.ppo_minibatch_size),
         reward=reward_cfg,
         env=env_cfg,
         wandb_project=args.wandb_project,

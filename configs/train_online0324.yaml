@@ -37,13 +37,15 @@ episodes: 300
 max_episode_steps: 200
 seed: 42
 
-# --- 策略梯度（Actor-Critic）---
-# 回报折扣；critic 拟合目标中的 bootstrap 权重
+# --- MAPPO（多智能体 PPO + 集中式 critic）---
 gamma: 0.99
-# 价值项系数、策略熵 bonus 系数（越大越鼓励探索）
 value_coef: 0.5
 entropy_coef: 0.01
 lr: 0.0003
+ppo_clip: 0.2
+ppo_epochs: 4
+gae_lambda: 0.95
+ppo_minibatch_size: 32
 
 # --- 网络结构（marl/models.py TODCHeteroActorCritic）---
 hidden_dim: 128
@@ -60,7 +62,7 @@ ddp_find_unused_parameters: false
 # true 且非 DDP 时，对多块 GPU 使用 DataParallel（需 gpu_ids 多于 1 才真正并行）
 multi_gpu: true
 # 使用的 GPU 编号：YAML 里可写整数 1 或字符串 "0,1"；与命令行 --gpu-ids 一致
-gpu_ids: 1
+gpu_ids: 4
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
@@ -73,16 +75,15 @@ schemes:
 time_res: 1.0
 # decision：一次 env.step 对应一次在线决策/重规划事件（与 main0319 内层循环一致）；time 为另一模式
 step_mode: decision
-# false：地图资源缺失时直接失败；true：允许占位数据（调试用）
-allow_dummy_if_missing: false
-# true：按 obtainDWAprePath 触发 DWA 预轨迹比较，过阈值则重规划（与 main0319 一致）
 enable_dwa_replan: true
 
-# --- 可选：直接传入 TODCMARLEnv(config) 的其它项（与上面 time_res/step_mode 等同传时，本字典优先覆盖同名键）---
+# --- 可选：传入 TODCMARLEnv(config)；obs 子字典供观测生成（如友机感知半径）---
 # env:
 #   map_root: /abs/path/to/map
 #   collision_dist: 25.0
 #   cap_dist: 200.0
+#   obs:
+#     ally_perception_radius: 50000.0
 
 # --- 奖励权重（marl/rewards.py RewardConfig；仅下列字段会写入，其余键被忽略）---
 reward:

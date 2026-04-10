@@ -1,3 +1,8 @@
+"""MARL 观测张量构造：将几何与分配关系转为策略网络可用的 dict。
+
+与 ``TODCMARLEnv._build_obs`` 配合；候选行格式见 ``CandidateColumns``。
+分配敌、友机槽位与 ``pairs_realE2P`` 对齐；攻击目标坐标取自 ``v_e_nodes[:,6:8]``（与推断目标一致）。
+"""
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 from intercept.IsoPair.obtainRLOutput import _extract_iso_points
@@ -41,11 +46,18 @@ class CandidateColumns:
 
 
 class TODCObservationGenerator:
-    """Observation builder that outputs model-aligned tensors directly."""
+    """从仿真状态构建单步观测 dict（含策略输入与计奖用 ``enemies``/``reward_nodes`` 等）。"""
 
-    def __init__(self, candidate_limit: Optional[int] = None, candidate_cols: Optional[CandidateColumns] = None):
+    def __init__(
+        self,
+        candidate_limit: Optional[int] = None,
+        candidate_cols: Optional[CandidateColumns] = None,
+        ally_perception_radius: Optional[float] = None,
+    ):
         self.candidate_limit = int(candidate_limit) if candidate_limit is not None else None
         self.cols = candidate_cols or CandidateColumns()
+        # 仅感知半径内的友机；None 表示不裁剪（极大半径）
+        self.ally_perception_radius = float(ally_perception_radius) if ally_perception_radius is not None else float("inf")
 
     def generate(
         self,
@@ -62,6 +74,10 @@ class TODCObservationGenerator:
         inferred_targets: Optional[np.ndarray] = None,
         pairs_realE2P: Optional[np.ndarray] = None,
     ) -> Dict[str, np.ndarray]:
+        """组装节点特征并调用 ``_build_model_aligned_obs``。
+
+        ``pairs_realE2P`` 为当前 E–P 分配；缺失时 ``_build_c_nodes`` 会报错。
+        """
         v_p_nodes = self._build_p_nodes(pos_p, v_p)
         v_e_nodes = self._build_e_nodes(pos_e, v_e, value_pos, inferred_targets)
         v_c_nodes, v_c_mask, reward_nodes = self._build_c_nodes(
@@ -82,8 +98,24 @@ class TODCObservationGenerator:
             v_c_mask=v_c_mask,
             value_pos=value_pos,
             reward_nodes=reward_nodes,
+            pos_p=pos_p,
+            pos_e=pos_e,
+            pairs_realE2P=pairs_realE2P,
         )
         return model_obs
+
+    @staticmethod
+    def _eid_for_each_pid(pairs_realE2P: np.ndarray, num_p: int) -> np.ndarray:
+        """pairs rows (eid, pid) -> eid assigned to each pursuer index, -1 if missing."""
+        out = np.full(num_p, -1, dtype=np.int64)
+        if pairs_realE2P is None or pairs_realE2P.size == 0:
+            return out
+        pr = np.asarray(pairs_realE2P, dtype=np.int64)
+        for i in range(pr.shape[0]):
+            eid, pid = int(pr[i, 0]), int(pr[i, 1])
+            if 0 <= pid < num_p:
+                out[pid] = eid
+        return out
 
     def _build_model_aligned_obs(
         self,
@@ -94,8 +126,14 @@ class TODCObservationGenerator:
         v_c_mask: np.ndarray,
         value_pos: np.ndarray,
         reward_nodes: np.ndarray,
+        pos_p: np.ndarray,
+        pos_e: np.ndarray,
+        pairs_realE2P: Optional[np.ndarray],
     ) -> Dict[str, np.ndarray]:
-        """Build obs tensors already aligned to UAVInterceptionNetwork.forward inputs."""
+        """构建与 ``UAVInterceptionNetwork`` 键一致的观测（首维为 pursuer 批 ``P``）。
+
+        ``asset_target_*`` 为各分配敌在 ``v_e_nodes`` 中的推断攻击目标 ``(x,y)``。
+        """
         num_p = v_p_nodes.shape[0]
         num_e = v_e_nodes.shape[0]
         k_max = v_c_nodes.shape[1]
@@ -104,17 +142,53 @@ class TODCObservationGenerator:
         theta_p = np.arctan2(v_p_nodes[:, 5], v_p_nodes[:, 4])
         self_uav = np.stack([v_p_nodes[:, 0], v_p_nodes[:, 1], theta_p], axis=-1)[:, None, :].astype(np.float32)
 
-        # ally_uavs: [P, max(1, P-1), 3], ally_mask: [P, max(1, P-1)]
+        theta_e = np.arctan2(v_e_nodes[:, 5], v_e_nodes[:, 4])
+        eid_by_pid = self._eid_for_each_pid(pairs_realE2P if pairs_realE2P is not None else np.empty((0, 2)), num_p)
+
+        # allies_local: [P, A, 3] — 仅感知半径内友机，按距离升序填满槽位
         ally_slots = max(1, num_p - 1)
-        ally_uavs = np.zeros((num_p, ally_slots, 3), dtype=np.float32)
+        allies_local = np.zeros((num_p, ally_slots, 3), dtype=np.float32)
         ally_mask = np.zeros((num_p, ally_slots), dtype=bool)
+        enemy_assigned_self = np.zeros((num_p, 1, 3), dtype=np.float32)
+        enemy_assigned_per_ally = np.zeros((num_p, ally_slots, 3), dtype=np.float32)
+        enemy_self_mask = np.zeros((num_p, 1), dtype=bool)
+        ally_enemy_mask = np.zeros((num_p, ally_slots), dtype=bool)
+        # 重要设施：分配敌在 v_e_nodes 中推断的攻击目标平面坐标 [E,2] -> 按分配关系切片
+        asset_target_self = np.zeros((num_p, 1, 2), dtype=np.float32)
+        asset_target_per_ally = np.zeros((num_p, ally_slots, 2), dtype=np.float32)
+
+        rad = self.ally_perception_radius
         for pid in range(num_p):
-            others = [i for i in range(num_p) if i != pid]
-            if len(others) == 0:
-                continue
-            vals = np.stack([v_p_nodes[others, 0], v_p_nodes[others, 1], theta_p[others]], axis=-1).astype(np.float32)
-            ally_uavs[pid, : len(others)] = vals
-            ally_mask[pid, : len(others)] = True
+            others = [j for j in range(num_p) if j != pid]
+            if len(others) > 0:
+                dists = [
+                    float(np.hypot(pos_p[pid, 0] - pos_p[j, 0], pos_p[pid, 1] - pos_p[j, 1]))
+                    for j in others
+                ]
+                order = np.argsort(np.asarray(dists, dtype=np.float64))
+                in_range = [others[int(i)] for i in order if dists[int(i)] <= rad]
+                n_fill = min(ally_slots, len(in_range))
+                for slot in range(n_fill):
+                    j = in_range[slot]
+                    allies_local[pid, slot, 0] = v_p_nodes[j, 0]
+                    allies_local[pid, slot, 1] = v_p_nodes[j, 1]
+                    allies_local[pid, slot, 2] = theta_p[j]
+                    ally_mask[pid, slot] = True
+                    eid_j = int(eid_by_pid[j])
+                    if 0 <= eid_j < num_e:
+                        ally_enemy_mask[pid, slot] = True
+                        enemy_assigned_per_ally[pid, slot, 0] = pos_e[eid_j, 0]
+                        enemy_assigned_per_ally[pid, slot, 1] = pos_e[eid_j, 1]
+                        enemy_assigned_per_ally[pid, slot, 2] = float(theta_e[eid_j])
+                        asset_target_per_ally[pid, slot, :] = v_e_nodes[eid_j, 6:8].astype(np.float32)
+
+            eid_self = int(eid_by_pid[pid])
+            if 0 <= eid_self < num_e:
+                enemy_self_mask[pid, 0] = True
+                enemy_assigned_self[pid, 0, 0] = pos_e[eid_self, 0]
+                enemy_assigned_self[pid, 0, 1] = pos_e[eid_self, 1]
+                enemy_assigned_self[pid, 0, 2] = float(theta_e[eid_self])
+                asset_target_self[pid, 0, :] = v_e_nodes[eid_self, 6:8].astype(np.float32)
 
         # self_pts: [P, K, 8] = (x,y,theta,Delta_t,Delta_d,Delta_.
         # theta,pathL,DistanceV)
@@ -134,8 +208,7 @@ class TODCObservationGenerator:
             ally_pts[pid, : block.shape[0]] = block
             ally_pts_mask[pid, : block.shape[0]] = block_mask
 
-        # enemies: [P, E, 3] -> (x, y, theta), replicated per pursuer
-        theta_e = np.arctan2(v_e_nodes[:, 5], v_e_nodes[:, 4])
+        # enemies: [P, E, 3] -> (x, y, theta), replicated per pursuer（计奖用）
         enemies_single = np.stack([v_e_nodes[:, 0], v_e_nodes[:, 1], theta_e], axis=-1).astype(np.float32)
         enemies = np.repeat(enemies_single[None, :, :], num_p, axis=0)
         enemy_mask = np.ones((num_p, num_e), dtype=bool)
@@ -153,7 +226,12 @@ class TODCObservationGenerator:
 
         return {
             "self_uav": self_uav,
-            "ally_uavs": ally_uavs,
+            "allies_local": allies_local,
+            "enemy_assigned_self": enemy_assigned_self,
+            "enemy_assigned_per_ally": enemy_assigned_per_ally,
+            "asset_target_self": asset_target_self,
+            "asset_target_per_ally": asset_target_per_ally,
+            "enemy_self_mask": np.asarray(enemy_self_mask, dtype=np.int8),
             "self_pts": self_pts,
             "ally_pts": ally_pts,
             "enemies": enemies,
@@ -161,6 +239,7 @@ class TODCObservationGenerator:
             "assets": assets,
             "reward_nodes": reward_nodes,
             "ally_mask": ally_mask,
+            "ally_enemy_mask": np.asarray(ally_enemy_mask, dtype=np.int8),
             "self_pts_mask": self_pts_mask,
             "ally_pts_mask": ally_pts_mask,
             "enemy_mask": enemy_mask,

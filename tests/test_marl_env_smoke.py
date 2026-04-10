@@ -6,7 +6,6 @@ from marl.MARL_env import TODCMARLEnv
 def test_marl_env_reset_and_step_smoke():
     env = TODCMARLEnv(
         {
-            "allow_dummy_if_missing": True,
             "render_mode": "none",
             "max_episode_steps": 20,
             "step_mode": "time",

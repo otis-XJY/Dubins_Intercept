@@ -6,7 +6,6 @@ from marl.MARL_env import TODCMARLEnv
 def test_marl_env_decision_step_mode_online_fields():
     env = TODCMARLEnv(
         {
-            "allow_dummy_if_missing": True,
             "render_mode": "none",
             "max_episode_steps": 10,
             "step_mode": "decision",

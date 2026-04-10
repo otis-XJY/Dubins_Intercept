@@ -26,14 +26,14 @@ flowchart LR
 - **智能体**：`num_P` 个 Pursuer；Evader 由轨迹与规则驱动，不是可学习对手。
 - **实现方式**：**单网络、批维 = P**——训练里把 `obs` 堆成 `[P, ...]`，一次 `model.forward` 得到每架机的 `action_probs` 与 `value`（见 [`../marl/train_online0325.py`](../marl/train_online0325.py) `_build_model_obs` + 主循环）。
 - **观测是 ego-centric**：每行是「我以自己为参考」的盟友、候选点、敌机等（[`../marl/obs_generator.py`](../marl/obs_generator.py)）。
-- **Critic**：对每架机输出标量 `V(s^i)`，输入含**池化后的全局上下文**（盟友/候选/敌机/目标等均值），接近 **CTDE 思想下的 decentralized actor + 中心化信息的价值估计**，但不是标准 MAPPO 的集中 Q 或显式 opponent 建模。
+- **Critic（MAPPO）**：集中式，输入为各智能体融合前八路分支特征拼接后的 **联合向量**，输出每机一个 `V_i`（[`../marl/models.py`](../marl/models.py) `critic_forward`）。
 
 ## 3. 输入 / 输出（接口层面）
 
 | 环节 | 内容 |
 |------|------|
-| **观测** | `Dict`：`self_uav`, `ally_uavs`, `self_pts`, `ally_pts`, `enemies`, `targets` 及各类 `*_mask`；环境侧还带 `reward_nodes`, `assets`, `asset_mask`（[`../marl/obs_generator.py`](../marl/obs_generator.py) `_build_model_aligned_obs`） |
-| **训练用张量** | [`train_online0325._build_model_obs`](../marl/train_online0325.py) **只转**模型 `forward` 需要的键；**不**把 `assets` / `reward_nodes` 喂给网络 |
+| **观测** | `Dict`：`self_uav`, `allies_local`, `enemy_assigned_self`, `enemy_assigned_per_ally`, `self_pts`, `ally_pts`、`asset_target_self`、`asset_target_per_ally` 及 `ally_mask`, `enemy_self_mask`, `ally_enemy_mask` 等；另含 `enemies`, `targets`, `reward_nodes`, `assets`（计奖/资产） |
+| **训练用张量** | [`train_online0325._build_model_obs`](../marl/train_online0325.py) 转模型 `forward` 所需键（含设施目标坐标）；**不**把 `assets` / `reward_nodes` 喂给网络 |
 | **动作** | 训练传入形状 `(num_P,)` 的 **int 索引**；环境 `_normalize_action` 也支持 dict `p_i` 或概率矩阵（[`../marl/MARL_env.py`](../marl/MARL_env.py)） |
 | **奖励 / 终止** | `rewards["p_i"]`；`terminations["__all__"]` / `truncations["__all__"]` 对所有智能体相同（全队同时 done/trunc） |
 
@@ -45,15 +45,14 @@ flowchart LR
 
 ## 5. 训练算法（[`../marl/train_online0325.py`](../marl/train_online0325.py)）
 
-- **实质**：逐步 **one-step actor-critic / 带 bootstrap 的策略梯度**（`target = r + γ (1-done) V(s')`），再 `advantage = target - V(s)`；**不是** PPO（无 rollout buffer、无 GAE、无 ratio clip）。
-- **损失**：`-mean(log π * adv.detach())` + `value_coef * MSE(V, target)` - `entropy_coef * H`；`logp` 与 `advantage` 按 **P 维平均**。
+- **MAPPO**：每回合整条 trajectory 存 rollout，**GAE(λ)** 估计优势，**PPO clip** 更新策略；超参见 YAML `ppo_clip`, `ppo_epochs`, `gae_lambda`, `ppo_minibatch_size`。
 - **多 scheme**：同一配置下为 A/B/C **各建一个 env + 模型 + 优化器**，并行跑 episode（非参数共享跨结构）。
 
 ## 6. 从 MARL / 工程角度值得关注的问题
 
 ### 6.1 观测与模型不一致 / 信息遗漏
 
-- 环境 `observation_space` 含 **`assets` / `asset_mask`**，但 **网络前向未使用** `assets`；`targets` 来自敌方节点上的推断目标坐标，**与高价值点 `ValuePos` 的多资产几何**未必一一对应。若任务强依赖「保资产」，模型侧可能**欠观测**。
+- 环境 `observation_space` 含 **`assets` / `asset_mask`**，但 **网络前向未使用** `assets`；已增加 **`asset_target_self` / `asset_target_per_ally`**（与 `v_e_nodes` 推断攻击目标一致）供策略编码。**静态**资产几何仍主要在 `assets` 中，若需显式几何对齐可再扩展输入。
 
 ### 6.2 配置与真实环境参数
 
@@ -71,7 +70,7 @@ flowchart LR
 
 ### 6.5 MARL 非平稳与算法强度
 
-- 多机同时学习 + 共享网络：**非平稳环境**典型设定；当前仅为 **on-policy 单步更新**，无多智能体常见稳定手段（IQMIX/MAPPO/VDN 等）。易出现震荡或不收敛，需靠熵、奖励缩放和大量 episode 调参。
+- 多机同时学习 + 共享网络：**非平稳**仍可能存在；已采用 **MAPPO** 与集中 critic，仍可能需要熵与奖励尺度调参。
 
 ### 6.6 动态 K 与 Gym 严格检查
 
@@ -89,7 +88,7 @@ flowchart LR
 
 - YAML 默认 `device: cuda:0`：无 GPU 时需改 **cpu**，否则脚本会显式报错。
 - 无显示服务器时建议 `export MPLBACKEND=Agg`，否则 `render` / W&B 截图可能失败。
-- 地图与轨迹 **joblib** 资源必须齐全；`allow_dummy_if_missing: false` 时缺失会直接 `FileNotFoundError`。
+- 地图与轨迹 **joblib** 资源必须齐全；缺失会直接 `FileNotFoundError`。
 
 ---
 

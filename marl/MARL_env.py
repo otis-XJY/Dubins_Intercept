@@ -31,6 +31,10 @@ from marl.obs_generator import TODCObservationGenerator
 from marl.rewards import TODCRewardFunction
 
 
+# 本模块实现 Gymnasium 接口的 Dubins 拦截环境：底层为 IsoMap/匈牙利分配与 main0319 风格内层仿真；
+# 策略输出离散候选索引，观测由 ``TODCObservationGenerator`` 生成。
+
+
 @dataclass
 class StepStats:
     replanned: bool = False
@@ -39,6 +43,13 @@ class StepStats:
 
 
 class TODCMARLEnv(gym.Env):
+    """多追捕者 vs 固定轨迹逃逸者的决策环境。
+
+    - ``step_mode=decision``：单次 ``step`` 对齐一次重规划/决策（内层可推进多物理 tick）。
+    - 动作：每机对当前候选集 ``k_max`` 的离散索引；动态 ``K`` 时 ``_sync_dynamic_k`` 重建空间。
+    - 观测：见 ``TODCObservationGenerator``；奖励见 ``TODCRewardFunction``。
+    """
+
     metadata = {"render_modes": ["none", "human", "rgb_array"], "render_fps": 20}
 
     def __init__(self, config: Optional[Dict] = None):
@@ -62,7 +73,13 @@ class TODCMARLEnv(gym.Env):
 
         self._load_assets()
         self.num_V = int(self.ValuePos.shape[0]) if hasattr(self, "ValuePos") else 0
-        self.obs_generator = TODCObservationGenerator()
+        obs_cfg = self.config.get("obs")
+        if not isinstance(obs_cfg, dict):
+            obs_cfg = {}
+        ally_r = obs_cfg.get("ally_perception_radius", self.config.get("ally_perception_radius"))
+        self.obs_generator = TODCObservationGenerator(
+            ally_perception_radius=float(ally_r) if ally_r is not None else None
+        )
         self._build_spaces()
 
         self.fig = None
@@ -116,7 +133,12 @@ class TODCMARLEnv(gym.Env):
         self.observation_space = spaces.Dict(
             {
                 "self_uav": spaces.Box(-np.inf, np.inf, shape=(self.num_P, 1, 3), dtype=np.float32),
-                "ally_uavs": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_slots, 3), dtype=np.float32),
+                "allies_local": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_slots, 3), dtype=np.float32),
+                "enemy_assigned_self": spaces.Box(-np.inf, np.inf, shape=(self.num_P, 1, 3), dtype=np.float32),
+                "enemy_assigned_per_ally": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_slots, 3), dtype=np.float32),
+                "enemy_self_mask": spaces.Box(0, 1, shape=(self.num_P, 1), dtype=np.int8),
+                "asset_target_self": spaces.Box(-np.inf, np.inf, shape=(self.num_P, 1, 2), dtype=np.float32),
+                "asset_target_per_ally": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_slots, 2), dtype=np.float32),
                 "self_pts": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.k_max, 8), dtype=np.float32),
                 "reward_nodes": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.k_max, 8), dtype=np.float32),
                 "ally_pts": spaces.Box(-np.inf, np.inf, shape=(self.num_P, ally_pts_slots, 8), dtype=np.float32),
@@ -124,6 +146,7 @@ class TODCMARLEnv(gym.Env):
                 "targets": spaces.Box(-np.inf, np.inf, shape=(self.num_P, self.num_E, 2), dtype=np.float32),
                 "assets": spaces.Box(-np.inf, np.inf, shape=(self.num_P, asset_slots, 2), dtype=np.float32),
                 "ally_mask": spaces.Box(0, 1, shape=(self.num_P, ally_slots), dtype=np.int8),
+                "ally_enemy_mask": spaces.Box(0, 1, shape=(self.num_P, ally_slots), dtype=np.int8),
                 "self_pts_mask": spaces.Box(0, 1, shape=(self.num_P, self.k_max), dtype=np.int8),
                 "ally_pts_mask": spaces.Box(0, 1, shape=(self.num_P, ally_pts_slots), dtype=np.int8),
                 "enemy_mask": spaces.Box(0, 1, shape=(self.num_P, self.num_E), dtype=np.int8),

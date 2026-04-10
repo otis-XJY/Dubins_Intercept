@@ -19,7 +19,6 @@ schemes:
   - Point-Wise Scoring Network
 time_res: 1.0
 step_mode: decision
-allow_dummy_if_missing: false
 enable_dwa_replan: true
 reward:
   alpha_dist_v: 1.0

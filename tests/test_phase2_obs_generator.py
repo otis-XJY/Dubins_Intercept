@@ -6,7 +6,6 @@ from marl.MARL_env import TODCMARLEnv
 def test_phase2_obs_shapes_and_mask_consistency():
     env = TODCMARLEnv(
         {
-            "allow_dummy_if_missing": True,
             "render_mode": "none",
             "max_episode_steps": 5,
         }
@@ -15,7 +14,7 @@ def test_phase2_obs_shapes_and_mask_consistency():
     obs, _ = env.reset()
 
     assert "self_uav" in obs
-    assert "ally_uavs" in obs
+    assert "allies_local" in obs
     assert "self_pts" in obs
     assert "self_pts_mask" in obs
 
@@ -26,7 +25,6 @@ def test_phase2_obs_shapes_and_mask_consistency():
     assert obs["self_pts"].shape == (env.num_P, k_curr, 8)
     assert obs["self_pts_mask"].shape == (env.num_P, k_curr)
 
-    # mask 只能是 0/1
     mask_vals = np.unique(obs["self_pts_mask"].astype(np.int32))
     assert np.all(np.isin(mask_vals, [0, 1]))
 
@@ -34,7 +32,6 @@ def test_phase2_obs_shapes_and_mask_consistency():
 def test_phase2_obs_direct_model_alignment_keys_exist_and_shapes():
     env = TODCMARLEnv(
         {
-            "allow_dummy_if_missing": True,
             "render_mode": "none",
             "max_episode_steps": 5,
         }
@@ -46,13 +43,19 @@ def test_phase2_obs_direct_model_alignment_keys_exist_and_shapes():
     ally_pts_slots = max(1, (env.num_P - 1) * k_curr)
 
     assert obs["self_uav"].shape == (env.num_P, 1, 3)
-    assert obs["ally_uavs"].shape == (env.num_P, ally_slots, 3)
+    assert obs["allies_local"].shape == (env.num_P, ally_slots, 3)
+    assert obs["enemy_assigned_self"].shape == (env.num_P, 1, 3)
+    assert obs["enemy_assigned_per_ally"].shape == (env.num_P, ally_slots, 3)
     assert obs["self_pts"].shape == (env.num_P, k_curr, 8)
     assert obs["ally_pts"].shape == (env.num_P, ally_pts_slots, 8)
     assert obs["enemies"].shape == (env.num_P, env.num_E, 3)
     assert obs["targets"].shape == (env.num_P, env.num_E, 2)
+    assert obs["asset_target_self"].shape == (env.num_P, 1, 2)
+    assert obs["asset_target_per_ally"].shape == (env.num_P, ally_slots, 2)
 
     assert obs["ally_mask"].shape == (env.num_P, ally_slots)
+    assert obs["ally_enemy_mask"].shape == (env.num_P, ally_slots)
+    assert obs["enemy_self_mask"].shape == (env.num_P, 1)
     assert obs["self_pts_mask"].shape == (env.num_P, k_curr)
     assert obs["ally_pts_mask"].shape == (env.num_P, ally_pts_slots)
     assert obs["enemy_mask"].shape == (env.num_P, env.num_E)
@@ -68,14 +71,12 @@ def test_phase2_obs_direct_model_alignment_keys_exist_and_shapes():
 def test_phase2_action_masking_fallback_distribution():
     env = TODCMARLEnv(
         {
-            "allow_dummy_if_missing": True,
             "render_mode": "none",
             "max_episode_steps": 5,
         }
     )
     obs, _ = env.reset()
 
-    # 全 0 动作应被归一化到有效 mask 上
     zero_action = np.zeros((env.num_P, obs["self_pts"].shape[1]), dtype=np.float32)
     normalized, _idx, _obs_snap = env._normalize_action(zero_action)
 

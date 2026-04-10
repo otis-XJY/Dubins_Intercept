@@ -1,3 +1,7 @@
+"""MARL 奖励：与动力学解耦，便于单独调参。
+
+步级项依赖 ``obs`` 中的 ``reward_nodes``、``self_pts_mask``、``enemies``（与策略输入键可部分重叠）。
+"""
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -33,10 +37,9 @@ class RewardConfig:
 
 
 class TODCRewardFunction:
-    """Standalone reward module for TODC MARL env.
+    """TODC 拦截任务的奖励：候选质量、全局分散/分配惩罚、机间安全、时间代价与终局项。
 
-    Keep reward logic outside environment dynamics so reward tuning can be
-    performed frequently with minimal side effects.
+    与 ``TODCMARLEnv._compute_rewards`` 配合；终端奖励通过 ``apply_terminal_rewards`` 写入各 ``p_i``。
     """
 
     def __init__(self, config: Optional[RewardConfig] = None):
@@ -70,6 +73,7 @@ class TODCRewardFunction:
         sim_dt: float,
         return_details: bool = False,
     ) -> Dict[str, float]:
+        """按当前动作从 ``reward_nodes`` 取候选特征，叠加全局与安全项，返回每机标量奖励。"""
         rewards = {f"p_{i}": 0.0 for i in range(num_p)}
         details = {f"p_{i}": {} for i in range(num_p)}
 
@@ -198,6 +202,7 @@ class TODCRewardFunction:
         asset_breached: bool,
         details: Optional[Dict[str, dict]] = None,
     ):
+        """在回合结束时写入捕获奖励与资产损失惩罚（通常各 ``p_i`` 相同）。"""
         terminal_bonus = 0.0
         terminal_penalty = 0.0
         if captured_delta > 0:

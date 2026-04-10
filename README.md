@@ -75,13 +75,7 @@ python -m marl.train_online0325 --config configs/train_online0324.yaml
 
 这个仓库已在训练脚本中按 step/episode 级别上报奖励分项，按上述步骤即可在 W&B 面板实时查看并对比它们的变化。
 
-1. real_mode
-: 从 map 目录加载真实资产（Map、IsoMap、PathE2Val_true 等），进行真实重规划。
-
-2. dummy_mode
-: 当资产缺失且 `allow_dummy_if_missing=true` 时启用，使用简化动态与虚拟候选。
-
-这使得你既可在完整场景训练，也可在无地图资产时快速 smoke test。
+训练与仿真需从 `map/` 加载完整 joblib 资源；缺失文件会直接报错。
 
 ### 3.2 Step 模式（关键）
 
@@ -138,19 +132,21 @@ python -m marl.train_online0325 --config configs/train_online0324.yaml
 
 观测由 [marl/obs_generator.py](marl/obs_generator.py) 生成，并直接对齐 [marl/models.py](marl/models.py) 的输入键。
 
-当前统一字段：
+策略网络使用的字段（另含 `reward_nodes`、`enemies` 等供计奖）：
 
 1. `self_uav`: `[P, 1, 3]`
-2. `ally_uavs`: `[P, max(1, P-1), 3]`
-3. `self_pts`: `[P, K_t, 8]`（`K_t` 为当前时刻动态候选数）
-4. `ally_pts`: `[P, max(1, (P-1)*K_t), 8]`
-5. `enemies`: `[P, E, 3]`
-6. `targets`: `[P, E, 2]`
-7. `ally_mask`, `self_pts_mask`, `ally_pts_mask`, `enemy_mask`, `target_mask`
+2. `allies_local`: `[P, max(1, P-1), 3]`（感知半径内友机）
+3. `enemy_assigned_self`: `[P, 1, 3]`（本机分配敌方）
+4. `enemy_assigned_per_ally`: `[P, max(1, P-1), 3]`（各友机分配敌方）
+5. `self_pts`: `[P, K_t, 8]`
+6. `ally_pts`: `[P, max(1, (P-1)*K_t), 8]`
+7. `ally_mask`, `enemy_self_mask`, `ally_enemy_mask`, `self_pts_mask`, `ally_pts_mask`
 
-### 4.1 self_uav / ally_uavs / enemies
+另有 `enemies`, `targets`, `assets` 等用于奖励计算。
 
-特征语义统一为几何状态 `(x, y, theta)`，并在观测维度上按自机、友机、敌机分组。
+### 4.1 几何特征
+
+特征语义为 `(x, y, theta)`，按自机、范围内友机、分配敌、候选点分组。
 
 ### 4.2 self_pts / ally_pts
 
@@ -254,25 +250,18 @@ python -m marl.train_online0325 --config configs/train_online0324.yaml
 
 ### 8.2 编码器与输入
 
-网络包含独立编码器：
+网络包含独立编码器（3 维或 8 维经 MLP 到隐藏维）：
 
-1. self_uav: 3 维
-2. ally_uavs: 3 维
-3. self_pts: 8 维
-4. ally_pts: 8 维
-5. enemies: 3 维
-6. targets: 2 维
-
-均通过 MLP 映射到同维度隐藏空间。
+1. self_uav、allies_local、enemy_assigned_self、enemy_assigned_per_ally：3 维
+2. self_pts、ally_pts：8 维
 
 ### 8.3 注意力分支
 
-共享多头注意力：
+多头注意力（ego 为 query）：
 
-1. ally
-2. ally_pts
-3. enemy
-4. target
+1. allies_local
+2. self_pts、ally_pts
+3. enemy_assigned_self、enemy_assigned_per_ally
 
 其中 A/B 使用 ego 查询 self_pts；C 使用 points 查询 ego。
 
@@ -287,12 +276,9 @@ python -m marl.train_online0325 --config configs/train_online0324.yaml
 3. Point-Wise Scoring Network（C）
 : 每个候选点独立聚合上下文并直接打分，无 pointer。
 
-### 8.5 Critic 设计
+### 8.5 Critic 设计（MAPPO）
 
-三方案共享 centralized critic：
-
-1. 对各实体编码做 masked pooling
-2. 拼接后输出 value
+三方案共享集中式 critic：将每机 **六路融合前特征**（与 actor 分支维度一致）拼成 `[1, P·6H]`，经 MLP 输出 **每机一个** value。
 
 ---
 
@@ -300,23 +286,12 @@ python -m marl.train_online0325 --config configs/train_online0324.yaml
 
 实现文件：[marl/train_online0325.py](marl/train_online0325.py)。
 
-### 9.1 训练算法
+### 9.1 训练算法（MAPPO）
 
-当前实现是轻量 A2C 风格在线更新：
-
-1. 按 `action_probs` 采样动作。
-2. 单步 bootstrap 目标：
-: `target = r + gamma * (1-done) * V(next)`
-3. 策略损失：
-: `L_policy = -E[logpi * advantage]`
-4. 价值损失：
-: `L_value = MSE(V, target)`
-5. 熵正则：
-: `-entropy_coef * entropy`
-
-总损失：
-
-1. `L = L_policy + value_coef * L_value - entropy_coef * entropy`
+1. 每回合收集整段 rollout（`obs, action, logπ, r, V`）。
+2. **GAE(λ)** 计算优势；优势可标准化。
+3. **PPO clip**：对策略比 `r = π_new/π_old` 做截断 surrogate；价值项为 `MSE(V, return)`；熵 bonus。
+4. 多 epoch、按 `ppo_minibatch_size` 小批量更新（见 YAML：`ppo_clip`, `ppo_epochs`, `gae_lambda`）。
 
 ### 9.2 多方案并训
 
