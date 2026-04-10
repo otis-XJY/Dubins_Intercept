@@ -309,7 +309,9 @@ class TODCMARLEnv(gym.Env):
         self._load_evader_profile(self.evader_profile_dirs[0])
 
         self.num_E = int(self.Evader.shape[0])
+        self.num_E_ = self.num_E
         self.num_P = int(self.PStart_Point.shape[0])
+        self.num_P_ = self.num_P
         self.agents = [f"p_{i}" for i in range(self.num_P)]
 
         self.E_PreRef = {
@@ -547,7 +549,8 @@ class TODCMARLEnv(gym.Env):
         targets = self.ValuePos[:, :2]
         res = predictLikelyTargetNew(traj, targets)
         validnew = res["rank_idx"][:, 0]
-        pairs_e2val = np.column_stack((np.arange(len(validnew)), validnew))
+        pairs_e2val_ = np.column_stack((np.arange(len(validnew)), validnew))
+        pairs_e2val=pairs_e2val_[self.UnCapEidNew, :]
 
         _, near_tpid_e = obtainNearETP(self.Trans_Point[:, :2], self.PosE, self.ValuePos, pairs_e2val)
 
@@ -585,8 +588,17 @@ class TODCMARLEnv(gym.Env):
         self.IsoMap_i_tt_P2Iso = [row + [None] * (time_l - len(row)) for row in iso_p_raw]
         self.IsoMap_i_tt_E2Iso = [row + [None] * (time_l - len(row)) for row in iso_e_raw]
 
+
+        self.num_E_ = len(self.IsoMap_i_tt_E2Iso)   
+        self.num_P_ = len(self.IsoMap_i_tt_P2Iso)
+
         eids, pids, te_idx, tp_idx = np.meshgrid(
-            np.arange(self.num_E), np.arange(self.num_P), np.arange(time_l), np.arange(time_l), indexing="ij"
+            self.UnCapEid, self.UnCapPid, np.arange(time_l), np.arange(time_l), indexing="ij"
+        )
+
+        idxE, idxP, te_idx, tp_idx = np.meshgrid(
+            np.arange(self.num_E_),np.arange(self.num_P_),  np.arange(time_l), np.arange(time_l),
+            indexing='ij'
         )
 
         distances = np.min(self._pairwise_dist(), axis=1)
@@ -613,8 +625,8 @@ class TODCMARLEnv(gym.Env):
             pids.ravel(),
             te_idx.ravel(),
             tp_idx.ravel(),
-            eids.ravel(),
-            pids.ravel(),
+            idxE.ravel(),
+            idxP.ravel(),
         )
         results = []
         for eid, pid, te, tp, ide, idp in flat:
