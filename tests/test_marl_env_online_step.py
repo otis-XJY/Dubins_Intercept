@@ -3,19 +3,17 @@ import numpy as np
 from marl.MARL_env import TODCMARLEnv
 
 
-def test_marl_env_decision_step_mode_online_fields():
+def test_marl_env_online_step_info_fields():
     env = TODCMARLEnv(
         {
             "render_mode": "none",
             "max_episode_steps": 10,
-            "step_mode": "decision",
         }
     )
 
     obs, info = env.reset()
     assert "self_pts" in obs
     assert isinstance(info["real_mode"], bool)
-    assert info["step_mode"] == "decision"
     assert "t_all" in info
 
     action = np.zeros((env.num_P,), dtype=np.int64)
@@ -29,7 +27,6 @@ def test_marl_env_decision_step_mode_online_fields():
 
     for i in range(env.num_P):
         ii = infos[f"p_{i}"]
-        assert ii["step_mode"] == "decision"
         assert ii["delta_t_all"] >= 0.0
         assert ii["sim_dt"] > 0.0
         assert ii["t_all"] >= 0.0

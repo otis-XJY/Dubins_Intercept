@@ -12,7 +12,7 @@ import numpy as np
 from gymnasium import spaces
 from matplotlib.animation import FFMpegWriter
 from scipy.optimize import linear_sum_assignment
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -45,7 +45,7 @@ class StepStats:
 class TODCMARLEnv(gym.Env):
     """多追捕者 vs 固定轨迹逃逸者的决策环境。
 
-    - ``step_mode=decision``：单次 ``step`` 对齐一次重规划/决策（内层可推进多物理 tick）。
+    - 单次 ``step`` 对齐一次重规划/决策（内层可推进多物理 tick）。
     - 动作：每机对当前候选集 ``k_max`` 的离散索引；动态 ``K`` 时 ``_sync_dynamic_k`` 重建空间。
     - 观测：见 ``TODCObservationGenerator``；奖励见 ``TODCRewardFunction``。
     """
@@ -65,8 +65,6 @@ class TODCMARLEnv(gym.Env):
         self.k_max = 1
         self.render_mode = self.config.get("render_mode", "none")
         self.enable_dwa_replan = bool(self.config.get("enable_dwa_replan", True))
-        # step_mode="decision" makes one RL step align with one online decision event (replan).
-        self.step_mode = str(self.config.get("step_mode", "decision")).lower()
         self.max_episode_steps = int(self.config.get("max_episode_steps", 600))
         self.collision_dist = float(self.config.get("collision_dist", 25.0))
         self.reward_fn = TODCRewardFunction.from_env_config(self.config)
@@ -89,8 +87,6 @@ class TODCMARLEnv(gym.Env):
 
         self.episode_step = 0
         self.last_min_dist = None
-        self.last_action_weights = np.zeros((self.num_P, self.k_max), dtype=np.float32)
-        self.last_action_indices = np.zeros((self.num_P,), dtype=np.int64)
         self._profile_cursor = -1
         self.current_profile = None
         self.decision_step = 0
@@ -103,18 +99,6 @@ class TODCMARLEnv(gym.Env):
         self._ic_best_per_pair = None
         # 当前路径段起始时的全局仿真时间 t_all；t 置 0 时同步更新，使得 t_all = _t_all_at_path_start + t
         self._t_all_at_path_start = 0.0
-
-    def set_runtime_params(
-        self,
-        *,
-        step_mode: Optional[str] = None,
-    ):
-        """Update online decision-step runtime parameters safely."""
-        if step_mode is not None:
-            mode = str(step_mode).lower()
-            if mode not in {"decision", "time"}:
-                raise ValueError(f"Unsupported step_mode={step_mode}. Use 'decision' or 'time'.")
-            self.step_mode = mode
 
     def set_reward_params(self, **kwargs):
         """Runtime reward tuning without touching environment dynamics."""
@@ -160,8 +144,6 @@ class TODCMARLEnv(gym.Env):
         if k_new != self.k_max:
             self.k_max = max(1, k_new)
             self._build_spaces()
-            self.last_action_weights = np.zeros((self.num_P, self.k_max), dtype=np.float32)
-            self.last_action_indices = np.zeros((self.num_P,), dtype=np.int64)
 
     @staticmethod
     def _normalize_time_folder(tag: Optional[str]) -> Optional[str]:
@@ -343,10 +325,6 @@ class TODCMARLEnv(gym.Env):
         super().reset(seed=seed)
         options = options or {}
 
-        # Support per-episode runtime override for online control knobs.
-        if "step_mode" in options:
-            self.set_runtime_params(step_mode=options.get("step_mode"))
-
         reward_opts = options.get("reward")
         if isinstance(reward_opts, dict) and len(reward_opts) > 0:
             self.set_reward_params(**reward_opts)
@@ -361,7 +339,7 @@ class TODCMARLEnv(gym.Env):
         self.t_all = 0.0
         self._t_all_at_path_start = 0.0
 
-        self.PosE = self.Evader.copy()
+        self.PosE = self.Evader.copy() 
         self.PosP = self.PStart_Point.copy()
 
         self.PathPtrue = [p.reshape(-1, 1) for p in self.PosP]
@@ -413,7 +391,6 @@ class TODCMARLEnv(gym.Env):
             "t": float(self.t),
             "t_all": float(self.t_all),
             "sim_dt": float(self.sim_dt),
-            "step_mode": self.step_mode,
             "reward": {
                 "dist_progress_scale": float(self.reward_fn.config.dist_progress_scale),
                 "w_global": float(self.reward_fn.config.w_global),
@@ -425,42 +402,37 @@ class TODCMARLEnv(gym.Env):
         return obs, info
 
     def step(self, action_dict):
-        """RL 对外一步。decision 模式内层按 main0319：update -> _advance_from_paths -> _phase_check_decision 循环直至重规划或终止。"""
-        action_weights, action_indices, obs_at_action = self._normalize_action(action_dict)
-        self.last_action_weights = action_weights
-        self.last_action_indices = action_indices
+        """RL 对外一步：内层按 main0319，update -> _advance_from_paths -> _phase_check_decision 循环直至重规划或终止。"""
+        _, action_indices, obs_at_action = self._normalize_action(action_dict)
 
         stats = StepStats(replanned=False, collision=False, captured=0)
         delta_t_all = 0.0
 
-        decision_mode = self.step_mode == "decision"
         prev_cap = self.Capflag.copy()
 
-        if decision_mode:
-            # One RL step: 先应用动作，再内层循环 main0319：update -> _advance_from_paths -> check，
-            # 直至 need_replan、全局回合时间到、或其它终止。
-            self._apply_assignment_from_action(action_indices)
+        # One RL step: 先应用动作，再内层循环 main0319：update -> _advance_from_paths -> check，
+        # 直至 need_replan、全局回合时间到、或其它终止。
+        self._apply_assignment_from_action(action_indices)
 
-            t_all_before = float(self.t_all)
+        t_all_before = float(self.t_all)
 
-            while not np.all(self.Capflag) and (self.t_all < self.length_E_max /self.v_E):
-                self._phase_update()
-                self._advance_from_paths()
-                need_replan, terminal = self._phase_check_decision()
-                if terminal:
-                    stats.collision = bool(self._check_collision())
-                    break
-                if need_replan:
-                    self._replan_with_isomap()
-                    stats.replanned = True
-                    break
-                self._update_capflag_from_geometry()
+        while not np.all(self.Capflag) and (self.t_all < self.length_E_max / self.v_E):
+            self._phase_update()
+            self._advance_from_paths()
+            need_replan, terminal = self._phase_check_decision()
+            if terminal:
+                stats.collision = bool(self._check_collision())
+                break
+            if need_replan:
+                self._replan_with_isomap()
+                stats.replanned = True
+                break
+            self._update_capflag_from_geometry()
 
-            # TODO:测试如果个数变化会发生什么
-            stats.captured = int(np.sum(~prev_cap & self.Capflag))
-            self.decision_step += 1
-            self.episode_step += 1
-            delta_t_all = float(self.t_all) - t_all_before
+        stats.captured = int(np.sum(~prev_cap & self.Capflag))
+        self.decision_step += 1
+        self.episode_step += 1
+        delta_t_all = float(self.t_all) - t_all_before
 
         rewards, reward_details = self._compute_rewards(
             action_indices, sim_time_elapsed=delta_t_all, obs_at_action=obs_at_action
@@ -501,7 +473,6 @@ class TODCMARLEnv(gym.Env):
                 "t_all": float(self.t_all),
                 "sim_dt": float(self.sim_dt),
                 "decision_step": int(self.decision_step),
-                "step_mode": self.step_mode,
             }
             entry["reward_details"] = reward_details[f"p_{i}"]
             infos[f"p_{i}"] = entry
@@ -807,7 +778,6 @@ class TODCMARLEnv(gym.Env):
         cap_angle_half = float(self.CapRef["CapAngle"]) / 2.0
         prev_cap = self.Capflag.copy()
         self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
-        return int(np.sum(~prev_cap & self.Capflag))
 
     def _apply_assignment_from_action(self, action_indices: np.ndarray) -> None:
         """Apply RL-chosen candidate rows instead of Hungarian (requires valid isomap cache).
@@ -863,13 +833,42 @@ class TODCMARLEnv(gym.Env):
         else:
             eid = int(row[11]) if row.shape[0] > 11 else pid % self.num_E
         eid = max(0, min(eid, self.num_E - 1))
-        return float(self.PosE[eid, 0]), float(self.PosE[eid, 1]), float(self.PosE[eid, 2])
+        x, y, th = self._pos_e_xyz_for_global_eid(eid)
+        return float(x), float(y), float(th)
+
+    def _pos_e_xyz_for_global_eid(self, eid: int):
+        """全局 eid → 平面位置+朝向；紧凑 PosE 时用 UnCapEidNew 行映射，已移除敌用 Evader 初值。"""
+        eid = int(max(0, min(int(eid), self.num_E - 1)))
+        if self.PosE.shape[0] == self.num_E:
+            pe = self.PosE[eid]
+            return float(pe[0]), float(pe[1]), float(pe[2])
+        idx = np.where(np.asarray(self.UnCapEidNew, dtype=int) == eid)[0]
+        if idx.size > 0:
+            pe = self.PosE[int(idx[0])]
+            return float(pe[0]), float(pe[1]), float(pe[2])
+        ev = self.Evader[eid]
+        return float(ev[0]), float(ev[1]), float(ev[2])
+
+    def _positions_full_for_obs(self):
+        """内层仿真可能用紧凑 PosP/PosE；观测与网络需固定 (num_P,·)、(num_E,·) 时再展开。"""
+        if self.PosP.shape[0] == self.num_P and self.PosE.shape[0] == self.num_E:
+            return self.PosP, self.PosE
+        out_p = np.asarray(self.PStart_Point, dtype=float).copy()
+        for i in range(self.PosP.shape[0]):
+            pid = int(self.UnCapPidNew[i])
+            out_p[pid] = self.PosP[i]
+        out_e = np.asarray(self.Evader[:, :3], dtype=float).copy()
+        for i in range(self.PosE.shape[0]):
+            eid = int(self.UnCapEidNew[i])
+            out_e[eid] = self.PosE[i]
+        return out_p, out_e
 
     def _build_obs(self):
+        pos_p_obs, pos_e_obs = self._positions_full_for_obs()
         inferred_targets = np.array([self.ValuePos[i % len(self.ValuePos), :2] for i in range(self.num_E)])
         return self.obs_generator.generate(
-            pos_p=self.PosP,
-            pos_e=self.PosE,
+            pos_p=pos_p_obs,
+            pos_e=pos_e_obs,
             v_p=self.v_P,
             v_e=self.v_E,
             value_pos=self.ValuePos,

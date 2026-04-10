@@ -18,7 +18,6 @@ schemes:
   - Gated Query Network
   - Point-Wise Scoring Network
 time_res: 1.0
-step_mode: decision
 enable_dwa_replan: true
 reward:
   alpha_dist_v: 1.0

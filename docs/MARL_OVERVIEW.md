@@ -4,7 +4,7 @@
 
 - **任务**：多架 Pursuer 在障碍地图中拦截多架 Evader；底层是 Dubins / IsoMap 与任务分配等**传统规划管线**（与 `main/main0319forRL.py` 同源思路）。
 - **RL 扮演的角色**：不输出连续 `(v, ω)`，而是在每次**重规划**得到的离散**拦截候选点/方案**中为每个 Pursuer **选一个索引**（pointer / scoring）。
-- **时间语义**：默认 `step_mode: decision` 时，一次 `env.step` = 一次「在线决策步」：先应用动作，再内层循环推进仿真直到**需要重规划**、**终止**或**截断**（见 [`../marl/MARL_env.py`](../marl/MARL_env.py) 中 `step` 与注释）。
+- **时间语义**：一次 `env.step` = 一次「在线决策步」：先应用动作，再内层循环推进仿真直到**需要重规划**、**终止**或**截断**（见 [`../marl/MARL_env.py`](../marl/MARL_env.py) 中 `step` 与注释）。
 
 ```mermaid
 flowchart LR
@@ -56,7 +56,7 @@ flowchart LR
 
 ### 6.2 配置与真实环境参数
 
-- 训练脚本支持在 YAML / `--env-json` 中提供 **`env`** 字典，其键值会**合并进** `TODCMARLEnv` 的 `config`（可传 `map_root`、`collision_dist`、`cap_dist` 等）。与训练超参同级的字段仍由 `TrainConfig` 顶层的 `time_res`、`step_mode` 等控制（见 [`../configs/train_online0324.yaml`](../configs/train_online0324.yaml)）。
+- 训练脚本支持在 YAML / `--env-json` 中提供 **`env`** 字典，其键值会**合并进** `TODCMARLEnv` 的 `config`（可传 `map_root`、`collision_dist`、`cap_dist` 等）。与训练超参同级的字段仍由 `TrainConfig` 顶层的 `time_res`、`enable_dwa_replan` 等控制（见 [`../configs/train_online0324.yaml`](../configs/train_online0324.yaml)）。
 
 ### 6.3 动作与掩码（fail-fast）
 

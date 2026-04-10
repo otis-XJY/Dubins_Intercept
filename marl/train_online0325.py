@@ -3,7 +3,6 @@
 配置通过 YAML/CLI 注入 ``TrainConfig``；环境参数放在 ``env`` 字典（含 ``obs.ally_perception_radius`` 等）。
 """
 import argparse
-import sys
 import json
 import os
 import random
@@ -13,7 +12,6 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 import imageio
 import tempfile
@@ -43,7 +41,6 @@ class TrainConfig:
     gpu_ids: Optional[List[int]] = None
     schemes: Optional[List[str]] = None
     time_res: float = 1.0
-    step_mode: str = "decision"
     enable_dwa_replan: bool = True
     # MAPPO
     ppo_clip: float = 0.2
@@ -78,7 +75,6 @@ def _todc_marl_env_dict(cfg: TrainConfig, *, render_mode: str) -> Dict:
     out: Dict = {
         "max_episode_steps": cfg.max_episode_steps,
         "time_res": cfg.time_res,
-        "step_mode": cfg.step_mode,
         "enable_dwa_replan": cfg.enable_dwa_replan,
         "reward": cfg.reward,
     }
@@ -733,7 +729,6 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--gpu-ids", type=str, default="", help="Comma-separated GPU ids, e.g. 0,1,2")
     parser.add_argument("--schemes", type=str, nargs="*", default=None)
     parser.add_argument("--time-res", type=float, default=1.0)
-    parser.add_argument("--step-mode", type=str, default="decision", choices=["decision", "time"])
     parser.add_argument("--enable-dwa-replan", type=_str2bool, default=True)
     parser.add_argument("--ppo-clip", type=float, default=0.2)
     parser.add_argument("--ppo-epochs", type=int, default=4)
@@ -824,7 +819,6 @@ def _parse_args() -> TrainConfig:
         gpu_ids=_parse_gpu_ids(args.gpu_ids),
         schemes=args.schemes,
         time_res=args.time_res,
-        step_mode=args.step_mode,
         enable_dwa_replan=bool(args.enable_dwa_replan),
         ppo_clip=float(args.ppo_clip),
         ppo_epochs=int(args.ppo_epochs),

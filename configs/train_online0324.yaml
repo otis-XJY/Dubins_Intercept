@@ -73,8 +73,7 @@ schemes:
 # --- 环境动力学（传入 TODCMARLEnv 的项）---
 # 与仿真步长相关的时间分辨率（见 env.time_res / sim_dt）
 time_res: 1.0
-# decision：一次 env.step 对应一次在线决策/重规划事件（与 main0319 内层循环一致）；time 为另一模式
-step_mode: decision
+# 一次 env.step 对应一次在线决策/重规划事件（与 main0319 内层循环一致）
 enable_dwa_replan: true
 
 # --- 可选：传入 TODCMARLEnv(config)；obs 子字典供观测生成（如友机感知半径）---

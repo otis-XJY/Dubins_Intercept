@@ -56,14 +56,10 @@ def design_mode_to_name(design_mode: str) -> str:
 def build_actor_critic_schemes(
     schemes: Optional[Union[str, Sequence[str]]] = None,
     *,
-    p_dim: int = 6,
-    e_dim: int = 8,
-    c_dim: int = 6,
     hidden_dim: int = 128,
     num_heads: int = 4,
     device: Optional[Union[str, torch.device]] = None,
 ) -> Dict[str, "TODCHeteroActorCritic"]:
-    _ = (p_dim, e_dim, c_dim)
     if schemes is None:
         requested: List[str] = ["A", "B", "C"]
     elif isinstance(schemes, str):

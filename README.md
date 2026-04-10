@@ -77,26 +77,9 @@ python -m marl.train_online0325 --config configs/train_online0324.yaml
 
 训练与仿真需从 `map/` 加载完整 joblib 资源；缺失文件会直接报错。
 
-### 3.2 Step 模式（关键）
+### 3.2 时间步语义（关键）
 
-环境支持两种步进语义：
-
-1. `step_mode=time`
-: 每次 `env.step()` 推进一个固定时间步。
-
-2. `step_mode=decision`
-: 每次 `env.step()` 内部推进多个 time tick，直到发生一次重规划事件（或终止/超限），更贴近 online 决策语义。
-
-`decision` 模式下新增统计：
-
-1. `inner_ticks`
-: 当前 RL step 内部累计推进了多少时间 tick。
-
-2. `forced_decision`
-: 达到 `max_inner_ticks` 仍未触发重规划时，强制返回。
-
-3. `decision_step`
-: 累计的决策事件计数。
+每次 `env.step()` 对应一次**在线决策步**：先应用离散候选索引，再在内层循环中推进仿真直到发生一次重规划事件、终止或回合截断（与 `main0319` 风格一致）。`info` 中提供 `decision_step`、`delta_t_all`、`global_t_all` 等字段便于对齐仿真时间。
 
 ### 3.3 环境状态与路径更新
 
@@ -350,7 +333,7 @@ DDP 下注意：
 常见日志包括：
 
 1. step 级
-: reward, policy_loss, value_loss, entropy, replanned_ratio, inner_ticks, decision_step
+: reward, policy_loss, value_loss, entropy, replanned_ratio, decision_step
 
 2. episode 级
 : episode_return, episode_steps, episode_policy_loss, episode_value_loss, episode_entropy
@@ -455,6 +438,6 @@ DDP 同时覆盖奖励参数示例：
 
 1. 固定一个方案（先 A）做奖励与稳定性消融。
 2. 再做 A/B/C 三方案同配置对比。
-3. 最后将最佳方案迁移到更严格真实场景并调 `step_mode=decision` 相关超参。
+3. 最后将最佳方案迁移到更严格真实场景并调 `time_res`、`max_episode_steps` 等相关超参。
 
 如果你希望，我可以下一步直接给你补一份“实验模板文档”（包含推荐超参数网格、对比实验表头、W&B 面板命名规范），让你可以直接开系统化实验。

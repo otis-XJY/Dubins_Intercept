@@ -19,7 +19,6 @@ def test_train_online_single_scheme_smoke():
         seed=7,
         device="cpu",
         schemes=["Concatenative Query Network"],
-        step_mode="decision",
         enable_dwa_replan=True,
         ppo_epochs=1,
         ppo_minibatch_size=8,
@@ -43,7 +42,6 @@ def test_train_online_saves_last_checkpoint_smoke(tmp_path: Path):
         num_heads=4,
         device="cpu",
         schemes=["Gated Query Network"],
-        step_mode="decision",
         enable_dwa_replan=True,
         ppo_epochs=1,
         ppo_minibatch_size=8,
@@ -64,7 +62,6 @@ def test_load_config_file_yaml_and_json(tmp_path: Path):
     yaml_path = tmp_path / "cfg.yaml"
     yaml_path.write_text(
         "episodes: 3\n"
-        "step_mode: decision\n"
         "multi_gpu: true\n"
         "gpu_ids: [0, 1]\n"
         "reward:\n"
@@ -73,7 +70,6 @@ def test_load_config_file_yaml_and_json(tmp_path: Path):
     )
     cfg_yaml = _load_config_file(str(yaml_path))
     assert cfg_yaml["episodes"] == 3
-    assert cfg_yaml["step_mode"] == "decision"
     assert cfg_yaml["multi_gpu"] is True
     assert cfg_yaml["gpu_ids"] == [0, 1]
     assert cfg_yaml["reward"]["dist_progress_scale"] == 0.08

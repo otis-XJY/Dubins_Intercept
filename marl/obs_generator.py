@@ -5,31 +5,24 @@
 """
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
-from intercept.IsoPair.obtainRLOutput import _extract_iso_points
+
 import numpy as np
 
 
-# 列解释 (18列):
-# 0-1: te, tp
-# 2-3: ETPid, PTPid
-# 4-5: IsoPosidxE, IsoPosidxP
-# 6: Iso_dist
-# 7: path_len (pathidP[:, 2])
-# 8: cost
-# 9: Eid对应的ValPosid (pathidE[:, 1])
-# 10: Pid对应的TPid (pathidP[:, 1])
-# 11-12: Eid, Pid (原始ID)/[0 1]而不是[0 2]
-# 13: Eiso (pathidE[:, 2])
-# 14: Piso (pathidP[:, 2])
-# //15-17: costAll (如果是向量/矩阵，拼接全量)
-# 15-19:(Delta_t, Delta_d, Delta_v, Delta_L,Delta_V,
-# 20-24:cost_t, cost_d, cost_v, cost_L, cost_V))
+# IC 候选行列索引（与 MARL_env 中 IC_candidates 列布局一致；索引 0–24 共 25 列）:
+# 0–1: te, tp
+# 2–3: ETPid, PTPid
+# 4–5: IsoPosidxE, IsoPosidxP
+# 6: Iso_dist；7: path_len；8: cost（汇总，观测构造未单独索引）
+# 9: ValPosid（pathidE）；10: TPid（pathidP）
+# 11–12: Eid, Pid
+# 13–14: Eiso, Piso
+# 15–19: Delta_t, Delta_d, Delta_theta, path_L, Delta_V
+# 20–24: cost_t, cost_d, cost_theta, cost_L, cost_V
 @dataclass(frozen=True)
 class CandidateColumns:
     te: int = 0
     tp: int = 1
-    cost: int = 8
-    inferred_value_id: int = 9
     eid_ref: int = 11
     pid_ref: int = 12
     Delta_t: int = 15
@@ -301,15 +294,18 @@ class TODCObservationGenerator:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if pairs_realE2P is None:
             raise ValueError(
-                "pairs_realE2P is None: observation requires an E–P assignment from replan (check step_mode / enable_dwa_replan / reset loop)"
+                "pairs_realE2P is None: observation requires an E–P assignment from replan (check enable_dwa_replan / reset loop)"
             )
-        subsets = []
+        # 按全局 pid 索引子集；pairs 行数可少于 num_P（部分机无分配）
+        pid_to_subset = {}
         max_k = 0
         for eid, pid in pairs_realE2P:
+            eid = int(eid)
+            pid = int(pid)
             eidMask = (ic_candidates[:, self.cols.eid_ref].astype(int) == eid)
             pidMask = (ic_candidates[:, self.cols.pid_ref].astype(int) == pid)
             subset = ic_candidates[eidMask & pidMask]
-            subsets.append(subset)
+            pid_to_subset[pid] = subset
             max_k = max(max_k, int(subset.shape[0]) if subset.ndim > 0 else 0)
 
         if self.candidate_limit is not None:
@@ -320,8 +316,11 @@ class TODCObservationGenerator:
         reward_nodes = np.zeros((num_p, max_k, 8), dtype=np.float32)
         mask = np.zeros((num_p, max_k), dtype=np.float32)
 
+        ncols = ic_candidates.shape[1] if ic_candidates.ndim >= 2 else 0
+        empty_subset = np.empty((0, ncols), dtype=ic_candidates.dtype if ic_candidates.size else np.float64)
+
         for pid in range(num_p):
-            subset = subsets[pid]
+            subset = pid_to_subset.get(pid, empty_subset)
             if subset.size == 0:
                 continue
 
