@@ -113,7 +113,7 @@ wandb_project: dubins-marl-online
 wandb_entity: null
 wandb_run_name: online_multi_scheme
 # online：实时上传；offline：本地缓存后同步；disabled：不初始化 wandb
-wandb_mode: online
+wandb_mode: disabled
 
 # --- 日志与评估 ---
 # 每多少 episode 打印一行训练摘要（仅 rank0）

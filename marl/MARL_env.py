@@ -97,6 +97,9 @@ class TODCMARLEnv(gym.Env):
         self._p2tp_tp_idx_cache = None
         self._pairs_e2val_cache = None
         self._ic_best_per_pair = None
+        self._pairs_ic_compact: Optional[np.ndarray] = None
+        # 每全局 eid 的推断攻击目标 (x,y)，来自 ``predictLikelyTargetNew``；供观测与 v_e_nodes 一致
+        self._inferred_targets_e: Optional[np.ndarray] = None
         # 当前路径段起始时的全局仿真时间 t_all；t 置 0 时同步更新，使得 t_all = _t_all_at_path_start + t
         self._t_all_at_path_start = 0.0
 
@@ -339,8 +342,8 @@ class TODCMARLEnv(gym.Env):
         self.t_all = 0.0
         self._t_all_at_path_start = 0.0
 
-        self.PosE = self.Evader.copy() 
-        self.PosP = self.PStart_Point.copy()
+        self.PosE = self.Evader.copy() #动态的存活的敌机
+        self.PosP = self.PStart_Point.copy() #动态的存活的追捕者
 
         self.PathPtrue = [p.reshape(-1, 1) for p in self.PosP]
         self.PathP = [np.tile(self.PosP[i].reshape(-1, 1), (1, self.length_E_max)) for i in range(self.num_P)]
@@ -350,12 +353,12 @@ class TODCMARLEnv(gym.Env):
             for eid in range(self.num_E)
         ]
 
-        self.Capflag = np.array([False] * self.num_E)
-        self.pairs_realE2P = None
-        self.UnCapPid = np.arange(self.num_P, dtype=int)
-        self.UnCapEid = np.arange(self.num_E, dtype=int)
-        self.UnCapPidNew = self.UnCapPid.copy()
-        self.UnCapEidNew = self.UnCapEid.copy()
+        self.Capflag = np.array([False] * self.num_E) #连续的
+        self.pairs_realE2P = None #实际的id，构造观测的标准
+        self.UnCapPid = np.arange(self.num_P, dtype=int) #实际的id
+        self.UnCapEid = np.arange(self.num_E, dtype=int) #实际的id
+        self.UnCapPidNew = self.UnCapPid.copy() #实际的id
+        self.UnCapEidNew = self.UnCapEid.copy() #实际的id
 
         # self.IC = np.empty((0, 18), dtype=float)
         self.IC_candidates = np.empty((0, 18), dtype=float)
@@ -364,6 +367,8 @@ class TODCMARLEnv(gym.Env):
         self.ICFinalActionCandidates = np.empty((0, 18), dtype=float)
         self._path_e2tp_cache = None
         self._ic_best_per_pair = None
+        self._inferred_targets_e = None
+        self._pairs_ic_compact = None  # 与 pairs_realE2P 逐行对齐的 IC 表 11–12 列紧凑 (ide,idp)
 
         # main0319: 内层 _phase_update -> _advance_from_paths -> _phase_check_decision 直至 DWA 需重规划 (line 264)，再构建候选
         while not np.all(self.Capflag) and (self.t_all < self.length_E_max /self.v_E):
@@ -373,11 +378,14 @@ class TODCMARLEnv(gym.Env):
             if terminal:
                 break
             if need_replan:
-                self._replan_with_isomap()
+                self._compute_isomap_intercept_candidates()
+                self._apply_hungarian_and_paths()
                 break
             self._update_capflag_from_geometry()
 
-
+        if self._inferred_targets_e is None:
+            inferred, _ = self._predict_facility_ranks_for_e()
+            self._inferred_targets_e = inferred
 
         self.last_min_dist = self._pairwise_dist().min(axis=1)
         obs = self._build_obs()
@@ -424,7 +432,8 @@ class TODCMARLEnv(gym.Env):
                 stats.collision = bool(self._check_collision())
                 break
             if need_replan:
-                self._replan_with_isomap()
+                self._compute_isomap_intercept_candidates()
+                self._apply_hungarian_and_paths()
                 stats.replanned = True
                 break
             self._update_capflag_from_geometry()
@@ -508,18 +517,30 @@ class TODCMARLEnv(gym.Env):
         for _id, eid in enumerate(self.UnCapEidNew):
             self.PathEpre[_id] = self.PathE[int(np.where(eid == self.UnCapEid)[0][0])]
 
-    def _replan_with_isomap(self):
-        """Full replan: build candidates + Hungarian assignment + paths (legacy / smoke tests)."""
-        if not self._compute_isomap_intercept_candidates():
-            return
-        self._apply_hungarian_and_paths()
+    # def _replan_with_isomap(self):
+    #     """Full replan: build candidates + Hungarian assignment + paths (legacy / smoke tests)."""
+    #     self._compute_isomap_intercept_candidates()
+    #     self._apply_hungarian_and_paths()
+
+    def _predict_facility_ranks_for_e(self) -> Tuple[np.ndarray, np.ndarray]:
+        """单次 predictLikelyTargetNew：返回 (每机推断目标 xy float32 (num_E,2), rank_idx)。"""
+        traj = [self.PathE2Val_true[i][: max(2, int(self.t_all * self.v_E)), :] for i in range(self.num_E)]
+        res = predictLikelyTargetNew(traj, self.ValuePos[:, :2])
+        rank_idx = res["rank_idx"]
+
+        if rank_idx.ndim != 2 or rank_idx.shape[0] != self.num_E or rank_idx.shape[1] < 1:
+            raise ValueError(
+                f"predictLikelyTargetNew rank_idx 形状异常: {getattr(rank_idx, 'shape', None)}，"
+                f"期望第一维为 num_E={self.num_E} 且至少一列目标"
+            )
+        best_fac = rank_idx[:, 0].astype(np.int64, copy=False)
+        inferred = self.ValuePos[best_fac, :2].astype(np.float32)
+        return inferred, rank_idx
 
     def _compute_isomap_intercept_candidates(self) -> bool:
         """Build iso maps and intercept table; cache geometry for _apply_paths_from_assigned_rows. Raises if no valid IsoPairs."""
-        traj = [self.PathE2Val_true[i][: max(2, int(self.t_all * self.v_E)), :] for i in range(self.num_E)]
-        targets = self.ValuePos[:, :2]
-        res = predictLikelyTargetNew(traj, targets)
-        validnew = res["rank_idx"][:, 0]
+        self._inferred_targets_e, rank_idx = self._predict_facility_ranks_for_e()
+        validnew = rank_idx[:, 0]
         pairs_e2val_ = np.column_stack((np.arange(len(validnew)), validnew))
         pairs_e2val=pairs_e2val_[self.UnCapEidNew, :]
 
@@ -641,7 +662,6 @@ class TODCMARLEnv(gym.Env):
         self._e2tp_tp_idx_cache = e2tp_tp_idx
         self._p2tp_tp_idx_cache = p2tp_tp_idx
         self._pairs_e2val_cache = pairs_e2val
-        return True
 
     def _apply_hungarian_and_paths(self):
         ic_candidates = self._ic_best_per_pair
@@ -661,6 +681,7 @@ class TODCMARLEnv(gym.Env):
         self.ICFinalAssign = assigned.copy()
 
         pairs_realE2P_ = assigned[:, [11, 12]]
+        self._pairs_ic_compact = np.asarray(pairs_realE2P_, dtype=np.int64).copy()
 
         self.pairs_realE2P = np.array(
             [
@@ -737,13 +758,16 @@ class TODCMARLEnv(gym.Env):
 
     def _phase_update(self) -> None:
         """main0319:204-216 — 时间推进并同步未捕获 E-P 配对。"""
+        # 如果有捕获，但是分配不改变，则会
         dt = self.sim_dt
         self.t += dt
         self.t_all += dt
         if self.pairs_realE2P is not None and self.pairs_realE2P.shape[0] == self.Capflag.shape[0]:
-            self.UnCapPidNew = self.pairs_realE2P[~self.Capflag, 1].astype(int)
-            self.UnCapEidNew = self.pairs_realE2P[~self.Capflag, 0].astype(int)
-            self.pairs_realE2P = self.pairs_realE2P[~self.Capflag]
+            keep = ~self.Capflag
+            self.UnCapPidNew = self.pairs_realE2P[keep, 1].astype(int)
+            self.UnCapEidNew = self.pairs_realE2P[keep, 0].astype(int)
+            self.pairs_realE2P = self.pairs_realE2P[keep]
+            self._pairs_ic_compact = self._pairs_ic_compact[keep]
 
 
     def _phase_check_decision(self) -> Tuple[bool, bool]:
@@ -763,7 +787,6 @@ class TODCMARLEnv(gym.Env):
             need_replan = not bool(np.all(min_dists <= 50))
         return need_replan, False
 
-# TODO: 为什么返回新增捕获数
     def _update_capflag_from_geometry(self) -> int:
         """按最近追捕者更新 Capflag；返回本步新增捕获数。"""
         distances_now = self._pairwise_dist()
@@ -776,26 +799,36 @@ class TODCMARLEnv(gym.Env):
         angle_diff_now = (ang_pe_now - np.degrees(p_for_e_now[:, 2]) + 180.0) % 360.0 - 180.0
         cap_dist = float(self.CapRef["CapDist"])
         cap_angle_half = float(self.CapRef["CapAngle"]) / 2.0
-        prev_cap = self.Capflag.copy()
         self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
 
     def _apply_assignment_from_action(self, action_indices: np.ndarray) -> None:
         """Apply RL-chosen candidate rows instead of Hungarian (requires valid isomap cache).
 
-        `action_indices` 为每个 P 的离散候选下标（与 train 中 Categorical.sample() 一致），非概率向量。
+        `action_indices` 为每个全局 pid 的离散候选下标（与 train 中 Categorical.sample() 一致），非概率向量。
+        仅 ``pairs_realE2P`` 中仍存活的 (eid, pid) 会取候选并应用；无配对的 pid 忽略。
         """
         if self._path_e2tp_cache is None:
-            return
+            raise ValueError("path_e2tp_cache is None")
+        if self.pairs_realE2P is None or self.pairs_realE2P.size == 0:
+            raise ValueError("pairs_realE2P is None")
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
         mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
+        cols = self.obs_generator.cols
         assigned_rows = []
-        for pid in self.UnCapPidNew:
-            subset = self.ICFinalActionCandidates[self.ICFinalActionCandidates[:, 12].astype(int) == pid]
+        pr = np.asarray(self.pairs_realE2P, dtype=np.int64)
+        pic = self._pairs_ic_compact
+        for row_i in range(pr.shape[0]):
+            eid, pid = int(pr[row_i, 0]), int(pr[row_i, 1])
+            ceid, c_pid = int(pic[row_i, 0]), int(pic[row_i, 1])
+            subset = self.ICFinalActionCandidates[
+                (self.ICFinalActionCandidates[:, cols.eid_ref].astype(int) == ceid)
+                & (self.ICFinalActionCandidates[:, cols.pid_ref].astype(int) == c_pid)
+            ]
             n = int(subset.shape[0])
             idx = int(action_indices[pid])
             if idx < 0 or idx >= n:
-                raise IndexError(f"action index {idx} out of range for pid {pid} (n_candidates={n})")
+                raise IndexError(f"action index {idx} out of range for pid {pid} (eid={eid}, n_candidates={n})")
             if mask[pid, idx] <= 0:
                 raise ValueError(f"invalid action: mask[{pid}, {idx}] is zero for masked candidate")
             assigned_rows.append(subset[idx])
@@ -850,7 +883,7 @@ class TODCMARLEnv(gym.Env):
         return float(ev[0]), float(ev[1]), float(ev[2])
 
     def _positions_full_for_obs(self):
-        """内层仿真可能用紧凑 PosP/PosE；观测与网络需固定 (num_P,·)、(num_E,·) 时再展开。"""
+        # TODO:这里应该采用mask将无效的posp和pose剔除
         if self.PosP.shape[0] == self.num_P and self.PosE.shape[0] == self.num_E:
             return self.PosP, self.PosE
         out_p = np.asarray(self.PStart_Point, dtype=float).copy()
@@ -865,7 +898,15 @@ class TODCMARLEnv(gym.Env):
 
     def _build_obs(self):
         pos_p_obs, pos_e_obs = self._positions_full_for_obs()
-        inferred_targets = np.array([self.ValuePos[i % len(self.ValuePos), :2] for i in range(self.num_E)])
+        if self._inferred_targets_e is None:
+            raise ValueError("_inferred_targets_e 为 None，构建观测前必须先完成目标推断")
+
+        inferred_targets = np.asarray(self._inferred_targets_e, dtype=np.float32)
+        
+        if inferred_targets.shape != (self.num_E, 2):
+            raise ValueError(
+                f"_inferred_targets_e 形状应为 ({self.num_E}, 2)，实际为 {inferred_targets.shape}"
+            )
         return self.obs_generator.generate(
             pos_p=pos_p_obs,
             pos_e=pos_e_obs,
@@ -878,6 +919,7 @@ class TODCMARLEnv(gym.Env):
             candidate_pos_fn=self._extract_candidate_pos,
             inferred_targets=inferred_targets,
             pairs_realE2P=self.pairs_realE2P,
+            pairs_ic_ref=self._pairs_ic_compact,
         )
 
     def _normalize_action(self, action_dict) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:

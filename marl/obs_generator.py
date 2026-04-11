@@ -4,9 +4,21 @@
 分配敌、友机槽位与 ``pairs_realE2P`` 对齐；攻击目标坐标取自 ``v_e_nodes[:,6:8]``（与推断目标一致）。
 """
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Set, Tuple
 
 import numpy as np
+
+
+def alive_pid_eid_sets(
+    pairs_realE2P: Optional[np.ndarray], num_p: int, num_e: int
+) -> Tuple[Set[int], Set[int]]:
+    """由当前 ``pairs_realE2P`` 得到仍存活的全局 pid / eid 集合。"""
+    if pairs_realE2P is None or pairs_realE2P.size == 0:
+        return set(), set()
+    pr = np.asarray(pairs_realE2P, dtype=np.int64)
+    ap = {int(x) for x in np.unique(pr[:, 1]) if 0 <= int(x) < num_p}
+    ae = {int(x) for x in np.unique(pr[:, 0]) if 0 <= int(x) < num_e}
+    return ap, ae
 
 
 # IC 候选行列索引（与 MARL_env 中 IC_candidates 列布局一致；索引 0–24 共 25 列）:
@@ -15,7 +27,7 @@ import numpy as np
 # 4–5: IsoPosidxE, IsoPosidxP
 # 6: Iso_dist；7: path_len；8: cost（汇总，观测构造未单独索引）
 # 9: ValPosid（pathidE）；10: TPid（pathidP）
-# 11–12: Eid, Pid
+# 11–12: Eid, Pid 紧凑索引，而不是全局索引
 # 13–14: Eiso, Piso
 # 15–19: Delta_t, Delta_d, Delta_theta, path_L, Delta_V
 # 20–24: cost_t, cost_d, cost_theta, cost_L, cost_V
@@ -66,10 +78,12 @@ class TODCObservationGenerator:
         candidate_pos_fn: Optional[Callable[[np.ndarray, int], Tuple[float, float]]] = None,
         inferred_targets: Optional[np.ndarray] = None,
         pairs_realE2P: Optional[np.ndarray] = None,
+        pairs_ic_ref: Optional[np.ndarray] = None,
     ) -> Dict[str, np.ndarray]:
         """组装节点特征并调用 ``_build_model_aligned_obs``。
 
-        ``pairs_realE2P`` 为当前 E–P 分配；缺失时 ``_build_c_nodes`` 会报错。
+        ``pairs_realE2P`` 为当前 E–P 分配（全局 eid/pid）；缺失时 ``_build_c_nodes`` 会报错。
+        ``pairs_ic_ref`` 与 ``pairs_realE2P`` 逐行对齐，为 IC 表第 11–12 列使用的紧凑索引；为 None 时回退为与全局相同（仅当全局 id 与表内一致时有效）。
         """
         v_p_nodes = self._build_p_nodes(pos_p, v_p)
         v_e_nodes = self._build_e_nodes(pos_e, v_e, value_pos, inferred_targets)
@@ -82,6 +96,7 @@ class TODCObservationGenerator:
             value_pos=value_pos,
             candidate_pos_fn=candidate_pos_fn,
             pairs_realE2P=pairs_realE2P,
+            pairs_ic_ref=pairs_ic_ref,
         )
 
         model_obs = self._build_model_aligned_obs(
@@ -125,6 +140,7 @@ class TODCObservationGenerator:
     ) -> Dict[str, np.ndarray]:
         """构建与 ``UAVInterceptionNetwork`` 键一致的观测（首维为 pursuer 批 ``P``）。
 
+        友机槽与 ``ally_pts`` 仅含 ``pairs_realE2P`` 中仍存活的 pursuer；无配对 pid 无友机观测。
         ``asset_target_*`` 为各分配敌在 ``v_e_nodes`` 中的推断攻击目标 ``(x,y)``。
         """
         num_p = v_p_nodes.shape[0]
@@ -137,8 +153,9 @@ class TODCObservationGenerator:
 
         theta_e = np.arctan2(v_e_nodes[:, 5], v_e_nodes[:, 4])
         eid_by_pid = self._eid_for_each_pid(pairs_realE2P if pairs_realE2P is not None else np.empty((0, 2)), num_p)
+        alive_pids, alive_eids = alive_pid_eid_sets(pairs_realE2P, num_p, num_e)
 
-        # allies_local: [P, A, 3] — 仅感知半径内友机，按距离升序填满槽位
+        # allies_local: [P, A, 3] — 仅存活友机；感知半径内按距离升序填满槽位
         ally_slots = max(1, num_p - 1)
         allies_local = np.zeros((num_p, ally_slots, 3), dtype=np.float32)
         ally_mask = np.zeros((num_p, ally_slots), dtype=bool)
@@ -152,7 +169,9 @@ class TODCObservationGenerator:
 
         rad = self.ally_perception_radius
         for pid in range(num_p):
-            others = [j for j in range(num_p) if j != pid]
+            if pid not in alive_pids:
+                continue
+            others = [j for j in range(num_p) if j != pid and j in alive_pids]
             if len(others) > 0:
                 dists = [
                     float(np.hypot(pos_p[pid, 0] - pos_p[j, 0], pos_p[pid, 1] - pos_p[j, 1]))
@@ -168,7 +187,7 @@ class TODCObservationGenerator:
                     allies_local[pid, slot, 2] = theta_p[j]
                     ally_mask[pid, slot] = True
                     eid_j = int(eid_by_pid[j])
-                    if 0 <= eid_j < num_e:
+                    if 0 <= eid_j < num_e and eid_j in alive_eids:
                         ally_enemy_mask[pid, slot] = True
                         enemy_assigned_per_ally[pid, slot, 0] = pos_e[eid_j, 0]
                         enemy_assigned_per_ally[pid, slot, 1] = pos_e[eid_j, 1]
@@ -176,7 +195,7 @@ class TODCObservationGenerator:
                         asset_target_per_ally[pid, slot, :] = v_e_nodes[eid_j, 6:8].astype(np.float32)
 
             eid_self = int(eid_by_pid[pid])
-            if 0 <= eid_self < num_e:
+            if 0 <= eid_self < num_e and eid_self in alive_eids:
                 enemy_self_mask[pid, 0] = True
                 enemy_assigned_self[pid, 0, 0] = pos_e[eid_self, 0]
                 enemy_assigned_self[pid, 0, 1] = pos_e[eid_self, 1]
@@ -188,18 +207,7 @@ class TODCObservationGenerator:
         self_pts = np.asarray(v_c_nodes, dtype=np.float32)
         self_pts_mask = v_c_mask > 0.0
 
-        # ally_pts: concat others' candidate points for each pursuer
         ally_pts_len = max(1, (num_p - 1) * k_max)
-        ally_pts = np.zeros((num_p, ally_pts_len, 8), dtype=np.float32)
-        ally_pts_mask = np.zeros((num_p, ally_pts_len), dtype=bool)
-        for pid in range(num_p):
-            others = [i for i in range(num_p) if i != pid]
-            if len(others) == 0:
-                continue
-            block = self_pts[others].reshape(len(others) * k_max, 8)
-            block_mask = self_pts_mask[others].reshape(len(others) * k_max)
-            ally_pts[pid, : block.shape[0]] = block
-            ally_pts_mask[pid, : block.shape[0]] = block_mask
 
         # enemies: [P, E, 3] -> (x, y, theta), replicated per pursuer（计奖用）
         enemies_single = np.stack([v_e_nodes[:, 0], v_e_nodes[:, 1], theta_e], axis=-1).astype(np.float32)
@@ -216,6 +224,23 @@ class TODCObservationGenerator:
         num_v = assets_single.shape[0]
         assets = np.repeat(assets_single[None, :, :], num_p, axis=0)
         asset_mask = np.ones((num_p, num_v), dtype=bool)
+
+        self_uav, self_pts, self_pts_mask, allies_local, ally_mask, reward_nodes = self._zero_dead_pursuers(
+            self_uav,
+            self_pts,
+            self_pts_mask,
+            allies_local,
+            ally_mask,
+            reward_nodes,
+            alive_pids,
+            num_p,
+        )
+        ally_pts, ally_pts_mask = self._rebuild_ally_pts_from_self(
+            self_pts, self_pts_mask, num_p, k_max, ally_pts_len, alive_pids
+        )
+        enemies, enemy_mask, targets, target_mask = self._zero_dead_evaders(
+            enemies, enemy_mask, targets, target_mask, alive_eids, num_p, num_e
+        )
 
         return {
             "self_uav": self_uav,
@@ -239,6 +264,73 @@ class TODCObservationGenerator:
             "target_mask": target_mask,
             "asset_mask": asset_mask,
         }
+
+    def _zero_dead_pursuers(
+        self,
+        self_uav: np.ndarray,
+        self_pts: np.ndarray,
+        self_pts_mask: np.ndarray,
+        allies_local: np.ndarray,
+        ally_mask: np.ndarray,
+        reward_nodes: np.ndarray,
+        alive_pids: Set[int],
+        num_p: int,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """无配对的 pid（已拦截完成等）对应行置 0，mask 全 False。"""
+        for pid in range(num_p):
+            if pid in alive_pids:
+                continue
+            self_uav[pid] = 0.0
+            self_pts[pid] = 0.0
+            self_pts_mask[pid] = False
+            allies_local[pid] = 0.0
+            ally_mask[pid] = False
+            reward_nodes[pid] = 0.0
+        return self_uav, self_pts, self_pts_mask, allies_local, ally_mask, reward_nodes
+
+    @staticmethod
+    def _rebuild_ally_pts_from_self(
+        self_pts: np.ndarray,
+        self_pts_mask: np.ndarray,
+        num_p: int,
+        k_max: int,
+        ally_pts_len: int,
+        alive_pids: Set[int],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """仅存活友机的 ``self_pts`` 按全局 pid 升序拼接；无配对 pid 行保持全 0 / mask False。"""
+        ally_pts = np.zeros((num_p, ally_pts_len, 8), dtype=np.float32)
+        ally_pts_mask = np.zeros((num_p, ally_pts_len), dtype=bool)
+        for pid in range(num_p):
+            if pid not in alive_pids:
+                continue
+            others = [i for i in range(num_p) if i != pid and i in alive_pids]
+            if len(others) == 0:
+                continue
+            block = self_pts[others].reshape(len(others) * k_max, 8)
+            block_mask = self_pts_mask[others].reshape(len(others) * k_max)
+            ally_pts[pid, : block.shape[0]] = block
+            ally_pts_mask[pid, : block.shape[0]] = block_mask
+        return ally_pts, ally_pts_mask
+
+    @staticmethod
+    def _zero_dead_evaders(
+        enemies: np.ndarray,
+        enemy_mask: np.ndarray,
+        targets: np.ndarray,
+        target_mask: np.ndarray,
+        alive_eids: Set[int],
+        num_p: int,
+        num_e: int,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """无配对 eid 的列置 0，mask False（``assets`` 不在此处理）。"""
+        for eid in range(num_e):
+            if eid in alive_eids:
+                continue
+            enemies[:, eid, :] = 0.0
+            enemy_mask[:, eid] = False
+            targets[:, eid, :] = 0.0
+            target_mask[:, eid] = False
+        return enemies, enemy_mask, targets, target_mask
 
     def _build_p_nodes(self, pos_p: np.ndarray, v_p: float) -> np.ndarray:
         vx = v_p * np.cos(pos_p[:, 2])
@@ -291,21 +383,24 @@ class TODCObservationGenerator:
         value_pos: np.ndarray,
         candidate_pos_fn: Optional[Callable[[np.ndarray, int], Tuple[float, float]]],
         pairs_realE2P: Optional[np.ndarray],
+        pairs_ic_ref: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if pairs_realE2P is None:
             raise ValueError(
                 "pairs_realE2P is None: observation requires an E–P assignment from replan (check enable_dwa_replan / reset loop)"
             )
-        # 按全局 pid 索引子集；pairs 行数可少于 num_P（部分机无分配）
+        # IC 表 11–12 列为紧凑 ide/idp；过滤须用紧凑键。全局 eid/pid 仅用于 pid 槽与 alive。
+        pr = np.asarray(pairs_realE2P, dtype=np.int64)
+        pic = np.asarray(pairs_ic_ref, dtype=np.int64) if pairs_ic_ref is not None else None
         pid_to_subset = {}
         max_k = 0
-        for eid, pid in pairs_realE2P:
-            eid = int(eid)
-            pid = int(pid)
-            eidMask = (ic_candidates[:, self.cols.eid_ref].astype(int) == eid)
-            pidMask = (ic_candidates[:, self.cols.pid_ref].astype(int) == pid)
+        for row_i in range(pr.shape[0]):
+            eid_g, pid_g = int(pr[row_i, 0]), int(pr[row_i, 1])
+            ceid, c_pid = int(pic[row_i, 0]), int(pic[row_i, 1])
+            eidMask = (ic_candidates[:, self.cols.eid_ref].astype(int) == ceid)
+            pidMask = (ic_candidates[:, self.cols.pid_ref].astype(int) == c_pid)
             subset = ic_candidates[eidMask & pidMask]
-            pid_to_subset[pid] = subset
+            pid_to_subset[pid_g] = subset
             max_k = max(max_k, int(subset.shape[0]) if subset.ndim > 0 else 0)
 
         if self.candidate_limit is not None:
