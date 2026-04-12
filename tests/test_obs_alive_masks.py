@@ -70,6 +70,7 @@ def test_zero_dead_pursuer_and_evader_columns():
     assert np.allclose(out["self_uav"][0], [[[1.0, 0.0, 0.0]]], atol=1e-5)
     assert np.all(out["self_uav"][1:] == 0)
     assert not np.any(out["self_pts_mask"][1])
+    assert int(out["pursuer_active"][0]) == 1 and int(np.sum(out["pursuer_active"])) == 1
     assert np.all(out["enemies"][:, 1, :] == 0)
     assert not np.any(out["enemy_mask"][:, 1])
     # 设施全保留

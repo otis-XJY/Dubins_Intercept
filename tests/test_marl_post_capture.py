@@ -132,6 +132,29 @@ def test_step_after_extreme_capture_terminates_or_truncates(env_ready):
     assert term["__all__"] is True or trunc["__all__"] is True or env.episode_step >= 1
 
 
+def test_normalize_action_inactive_pursuer_index_minus_one(env_ready):
+    """部分捕获后无任务机动作 -1，_normalize_action 不报错的且 idx 为 -1。"""
+    env = env_ready
+    env.Capflag[0] = True
+    env._phase_update()
+    env._advance_from_paths()
+    env._update_capflag_from_geometry()
+    obs = env._build_obs()
+    env._sync_dynamic_k(obs)
+    active = obs["pursuer_active"].astype(bool)
+    act = np.full(env.num_P, -1, dtype=np.int64)
+    for i in range(env.num_P):
+        if active[i]:
+            m = obs["self_pts_mask"][i]
+            act[i] = int(np.argmax(m.astype(np.float32)))
+    _norm, idx, _snap = env._normalize_action(act)
+    for i in range(env.num_P):
+        if not active[i]:
+            assert idx[i] == -1
+        else:
+            assert idx[i] >= 0
+
+
 def test_build_obs_after_partial_manual_capture_shapes(env_ready):
     """人工标一敌捕获并同步几何后，观测首维仍为 num_P（Gym 批维不变）。"""
     env = env_ready
@@ -146,6 +169,8 @@ def test_build_obs_after_partial_manual_capture_shapes(env_ready):
     assert obs["self_pts"].shape[0] == env.num_P
     assert obs["enemies"].shape == (env.num_P, env.num_E, 3)
     assert obs["self_pts_mask"].shape[1] == obs["self_pts"].shape[1]
+    assert obs["pursuer_active"].shape == (env.num_P,)
+    assert int(np.sum(obs["pursuer_active"])) == env.num_P - 1
 
 
 def test_captured_total_matches_sum_capflag_on_normal_step(env_ready):

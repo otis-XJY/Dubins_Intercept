@@ -17,6 +17,8 @@ def test_phase2_obs_shapes_and_mask_consistency():
     assert "allies_local" in obs
     assert "self_pts" in obs
     assert "self_pts_mask" in obs
+    assert "pursuer_active" in obs
+    assert obs["pursuer_active"].shape == (env.num_P,)
 
     assert obs["self_uav"].shape == (env.num_P, 1, 3)
     assert obs["enemies"].shape == (env.num_P, env.num_E, 3)

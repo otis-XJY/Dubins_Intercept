@@ -139,6 +139,7 @@ class TODCMARLEnv(gym.Env):
                 "enemy_mask": spaces.Box(0, 1, shape=(self.num_P, self.num_E), dtype=np.int8),
                 "target_mask": spaces.Box(0, 1, shape=(self.num_P, self.num_E), dtype=np.int8),
                 "asset_mask": spaces.Box(0, 1, shape=(self.num_P, asset_slots), dtype=np.int8),
+                "pursuer_active": spaces.Box(0, 1, shape=(self.num_P,), dtype=np.int8),
             }
         )
 
@@ -387,7 +388,7 @@ class TODCMARLEnv(gym.Env):
             inferred, _ = self._predict_facility_ranks_for_e()
             self._inferred_targets_e = inferred
 
-        self.last_min_dist = self._pairwise_dist().min(axis=1)
+        self.last_min_dist = self._pairwise_dist()
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
         info = {
@@ -593,7 +594,7 @@ class TODCMARLEnv(gym.Env):
             indexing='ij'
         )
 
-        distances = np.min(self._pairwise_dist(), axis=1)
+        distances = self._pairwise_dist()
         x1, y1 = self.CapRef["CapDist"], self.CapRef["CapDist"]
         x2, y2 = 2 * self.CapRef["CapDistRef"], self.CapRef["CapDistRef"]
         cap_dist_time = np.where(
@@ -791,7 +792,7 @@ class TODCMARLEnv(gym.Env):
         """按最近追捕者更新 Capflag；返回本步新增捕获数。"""
         distances_now = self._pairwise_dist()
         assignments_now = np.argmin(distances_now, axis=0)
-        p_for_e_now = self.PosP[assignments_now]
+        p_for_e_now = self.PosP
         e_now = self.PosE
         dx_now = e_now[:, 0] - p_for_e_now[:, 0]
         dy_now = e_now[:, 1] - p_for_e_now[:, 1]
@@ -839,7 +840,7 @@ class TODCMARLEnv(gym.Env):
     def _pairwise_dist(self):
         pp = self.PosP[:, :2]
         ee = self.PosE[:, :2]
-        return np.linalg.norm(pp[:, None, :] - ee[None, :, :], axis=2)
+        return np.linalg.norm(pp - ee, axis=1)
 
     def _extract_candidate_pos(self, row: np.ndarray, pid: int) -> Tuple[float, float, float]:
 
@@ -883,17 +884,27 @@ class TODCMARLEnv(gym.Env):
         return float(ev[0]), float(ev[1]), float(ev[2])
 
     def _positions_full_for_obs(self):
-        # TODO:这里应该采用mask将无效的posp和pose剔除
+        """scatter 到全局槽位后，将非存活 id 的槽位置零，避免已拦截机几何进入 v_p/v_e 中间量。"""
         if self.PosP.shape[0] == self.num_P and self.PosE.shape[0] == self.num_E:
-            return self.PosP, self.PosE
-        out_p = np.asarray(self.PStart_Point, dtype=float).copy()
-        for i in range(self.PosP.shape[0]):
-            pid = int(self.UnCapPidNew[i])
-            out_p[pid] = self.PosP[i]
-        out_e = np.asarray(self.Evader[:, :3], dtype=float).copy()
-        for i in range(self.PosE.shape[0]):
-            eid = int(self.UnCapEidNew[i])
-            out_e[eid] = self.PosE[i]
+            out_p = np.asarray(self.PosP, dtype=float).copy()
+            out_e = np.asarray(self.PosE, dtype=float).copy()
+        else:
+            out_p = np.asarray(self.PStart_Point, dtype=float).copy()
+            for i in range(self.PosP.shape[0]):
+                pid = int(self.UnCapPidNew[i])
+                out_p[pid] = self.PosP[i]
+            out_e = np.asarray(self.Evader[:, :3], dtype=float).copy()
+            for i in range(self.PosE.shape[0]):
+                eid = int(self.UnCapEidNew[i])
+                out_e[eid] = self.PosE[i]
+        alive_p = {int(x) for x in np.asarray(self.UnCapPidNew, dtype=np.int64).ravel()}
+        alive_e = {int(x) for x in np.asarray(self.UnCapEidNew, dtype=np.int64).ravel()}
+        for pid in range(self.num_P):
+            if pid not in alive_p:
+                out_p[pid] = 0.0
+        for eid in range(self.num_E):
+            if eid not in alive_e:
+                out_e[eid] = 0.0
         return out_p, out_e
 
     def _build_obs(self):
@@ -926,6 +937,7 @@ class TODCMARLEnv(gym.Env):
         """解析策略输出：返回 (one-hot 权重, 每智能体离散索引, 决策时刻观测快照)。
 
         训练脚本通常传入 **采样后的索引** ``(num_P,)`` int；亦兼容 logits/概率矩阵。
+        无任务机（``pursuer_active[i]==0``）：**动作索引为 -1**，``norm`` 对应行为全零。
         快照用于计奖：仿真内层可能重规划并改变候选数 K，必须与选动作时的 mask 一致。
         """
         obs = self._build_obs()
@@ -967,8 +979,15 @@ class TODCMARLEnv(gym.Env):
                 w[:n0, :n1] = np.asarray(arr[:n0, :n1], dtype=np.float32)
                 idx = np.argmax(w * mask, axis=1).astype(np.int64)
 
+        active = np.asarray(obs["pursuer_active"], dtype=np.int8).reshape(-1)
+        if active.shape[0] != self.num_P:
+            raise ValueError(f"pursuer_active 长度应为 {self.num_P}，实际 {active.shape}")
+
         norm = np.zeros((self.num_P, k_curr), dtype=np.float32)
         for i in range(self.num_P):
+            if int(active[i]) == 0:
+                idx[i] = -1
+                continue
             valid_idx = np.where(mask[i] > 0)[0]
             if valid_idx.size == 0:
                 raise ValueError(f"no valid action candidates for pursuer {i} (self_pts_mask row is all zero)")
@@ -985,10 +1004,10 @@ class TODCMARLEnv(gym.Env):
         obs_at_action: Dict[str, np.ndarray],
     ):
         """`action_indices` 相对于 ``obs_at_action`` 中的候选掩码；几何类项用当前态势。"""
-        curr_min_dist = self._pairwise_dist().min(axis=1)
+        curr_min_dist = self._pairwise_dist()
         curr_obs = self._build_obs()
         obs = dict(curr_obs)
-        for key in ("reward_nodes", "self_pts_mask", "self_pts"):
+        for key in ("reward_nodes", "self_pts_mask", "self_pts", "pursuer_active"):
             obs[key] = obs_at_action[key]
         sd = float(self.sim_dt)
         rewards, details = self.reward_fn.compute_step_rewards(

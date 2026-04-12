@@ -77,9 +77,20 @@ class TODCRewardFunction:
         rewards = {f"p_{i}": 0.0 for i in range(num_p)}
         details = {f"p_{i}": {} for i in range(num_p)}
 
+        pa = obs.get("pursuer_active")
+        if pa is not None:
+            active_bool = np.asarray(pa, dtype=np.int8).reshape(-1).astype(bool)
+        else:
+            active_bool = np.asarray(obs["self_pts_mask"], dtype=np.float32).sum(axis=1) > 0
+        if active_bool.shape[0] != num_p:
+            raise ValueError(f"pursuer_active 或 mask 行数 {active_bool.shape[0]} != num_p {num_p}")
+
         prev_min_dist = curr_min_dist if last_min_dist is None else last_min_dist
         delta = prev_min_dist - curr_min_dist
         for i in range(num_p):
+            if not active_bool[i]:
+                details[f"p_{i}"]["r_progress"] = 0.0
+                continue
             details[f"p_{i}"]["r_progress"] = float(self.config.dist_progress_scale * delta[i])
             rewards[f"p_{i}"] += details[f"p_{i}"]["r_progress"]
 
@@ -90,12 +101,14 @@ class TODCRewardFunction:
         k_curr = reward_nodes.shape[1]
         selected_idx = np.zeros((num_p,), dtype=np.int64)
         # 支持两种动作输入格式：
-        # - 每个 agent 的采样索引（形状 (num_p,) 或标量/整型）
+        # - 每个 agent 的采样索引（形状 (num_p,) 或标量/整型）；无任务机动作可为 -1
         # - 每个 agent 的权重向量 / 概率分布（形状 (num_p, k_curr))
-        # 非法索引、空掩码、维度不匹配时直接报错（与 MARL_env._normalize_action 一致，便于排查）
         actions_arr = np.asarray(actions)
         if actions_arr.ndim == 1:
             for i in range(num_p):
+                if not active_bool[i]:
+                    selected_idx[i] = 0
+                    continue
                 idx = int(actions_arr[i])
                 valid_idx = np.where(mask[i] > 0)[0]
                 if valid_idx.size == 0:
@@ -105,6 +118,9 @@ class TODCRewardFunction:
                 selected_idx[i] = idx
         else:
             for i in range(num_p):
+                if not active_bool[i]:
+                    selected_idx[i] = 0
+                    continue
                 w = actions_arr[i]
                 w = np.asarray(w, dtype=np.float32)
                 if w.ndim == 0:
@@ -141,15 +157,20 @@ class TODCRewardFunction:
             + self.config.lambda_path_l * path_l
         )
         for i in range(num_p):
+            if not active_bool[i]:
+                r_qual[i] = 0.0
             details[f"p_{i}"]["r_qual"] = float(r_qual[i])
 
         sel_xy = selected[:, :2]
         r_div = np.zeros((num_p,), dtype=np.float32)
         if num_p > 1:
             for i in range(num_p):
+                if not active_bool[i]:
+                    continue
                 d2 = np.sum((sel_xy[i] - sel_xy) ** 2, axis=1)
                 term = np.exp(-d2 / (self.config.div_sigma ** 2 + 1e-12))
                 term[i] = 0.0
+                term = np.where(active_bool, term, 0.0)
                 r_div[i] = -float(np.sum(term))
 
         e_pos = enemies[0, :, :2] if enemies.ndim == 3 else np.zeros((0, 2), dtype=np.float32)
@@ -157,12 +178,14 @@ class TODCRewardFunction:
         if e_pos.shape[0] > 0:
             nearest_enemy = np.argmin(np.linalg.norm(sel_xy[:, None, :] - e_pos[None, :, :], axis=2), axis=1)
             for eid in np.unique(nearest_enemy):
-                ids = np.where(nearest_enemy == eid)[0]
+                ids = np.where((nearest_enemy == eid) & active_bool)[0]
                 if ids.size > 1:
                     r_assign[ids] -= float(self.config.assign_penalty)
 
         r_global = self.config.w_global * (r_div + r_assign)
         for i in range(num_p):
+            if not active_bool[i]:
+                r_global[i] = 0.0
             details[f"p_{i}"]["r_global"] = float(r_global[i])
 
         self_uav = np.asarray(obs["self_uav"], dtype=np.float32)
@@ -170,8 +193,11 @@ class TODCRewardFunction:
         r_safe = np.zeros((num_p,), dtype=np.float32)
         if num_p > 1:
             for i in range(num_p):
+                if not active_bool[i]:
+                    continue
                 d = np.linalg.norm(self_pos[i] - self_pos, axis=1)
                 d[i] = np.inf
+                d = np.where(active_bool, d, np.inf)
                 d_min = float(np.min(d))
                 if d_min < self.config.safe_dist_min:
                     r_safe[i] -= self.config.safe_penalty_scale * (self.config.safe_dist_min - d_min)
@@ -184,10 +210,14 @@ class TODCRewardFunction:
         else:
             r_time = 0.0
         for i in range(num_p):
-            details[f"p_{i}"]["r_time"] = r_time
+            details[f"p_{i}"]["r_time"] = float(r_time) if active_bool[i] else 0.0
 
         for i in range(num_p):
-            rewards[f"p_{i}"] += float(details[f"p_{i}"]["r_qual"] + details[f"p_{i}"]["r_global"] + details[f"p_{i}"]["r_safe"] + r_time)
+            if not active_bool[i]:
+                continue
+            rewards[f"p_{i}"] += float(
+                details[f"p_{i}"]["r_qual"] + details[f"p_{i}"]["r_global"] + details[f"p_{i}"]["r_safe"] + details[f"p_{i}"]["r_time"]
+            )
 
         if return_details:
             return rewards, details

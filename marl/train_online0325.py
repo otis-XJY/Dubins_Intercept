@@ -216,6 +216,7 @@ def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[s
         "ally_enemy_mask",
         "self_pts_mask",
         "ally_pts_mask",
+        "pursuer_active",
     }
     missing = [k for k in required_keys if k not in obs]
     if missing:
@@ -235,6 +236,7 @@ def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[s
         "ally_enemy_mask": _to_tensor(np.asarray(obs["ally_enemy_mask"], dtype=bool), device, dtype=torch.bool),
         "self_pts_mask": _to_tensor(np.asarray(obs["self_pts_mask"], dtype=bool), device, dtype=torch.bool),
         "ally_pts_mask": _to_tensor(np.asarray(obs["ally_pts_mask"], dtype=bool), device, dtype=torch.bool),
+        "pursuer_active": _to_tensor(np.asarray(obs["pursuer_active"], dtype=bool), device, dtype=torch.bool),
     }
 
 
@@ -332,8 +334,11 @@ def _run_eval_episode(
             obs_t = _build_model_obs(obs_np, device)
             out = model(obs_t)
             actions = torch.argmax(out["action_probs"], dim=-1)
+            act_np = actions.detach().cpu().numpy()
+            active_np = np.asarray(obs_np["pursuer_active"], dtype=bool).reshape(-1)
+            step_act = np.where(active_np, act_np, -1).astype(np.int64, copy=False)
 
-            next_obs_np, rewards, terms, truncs, infos = env.step(actions.detach().cpu().numpy())
+            next_obs_np, rewards, terms, truncs, infos = env.step(step_act)
             reward_vec = np.array([rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
 
             ep_return += float(np.mean(reward_vec))
@@ -496,7 +501,10 @@ def train_online(cfg: TrainConfig):
                     logp = dist_cat.log_prob(actions)
                     vals = unwrap.critic_forward(obs_t)
 
-                next_obs_np, env_rewards, terms, truncs, infos = env.step(actions.detach().cpu().numpy())
+                act_np = actions.detach().cpu().numpy()
+                active_np = np.asarray(obs_np["pursuer_active"], dtype=bool).reshape(-1)
+                step_act = np.where(active_np, act_np, -1).astype(np.int64, copy=False)
+                next_obs_np, env_rewards, terms, truncs, infos = env.step(step_act)
                 reward_vec = np.array([env_rewards[f"p_{i}"] for i in range(env.num_P)], dtype=np.float32)
                 reward_details = infos["_reward_details_all"]
 

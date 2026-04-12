@@ -333,8 +333,18 @@ class UAVInterceptionNetwork(nn.Module):
 
         self_pts_mask = obs["self_pts_mask"]
         masked_logits = logits.masked_fill(~self_pts_mask, -1e9)
+        active = self_pts_mask.any(dim=-1)
+        inactive = ~active
+        if inactive.any():
+            masked_logits = masked_logits.clone()
+            masked_logits[inactive] = 0.0
         probs = torch.softmax(masked_logits, dim=-1)
-        best_candidate_idx = torch.argmax(probs, dim=-1)
+        if inactive.any():
+            probs = probs.clone()
+            probs[inactive] = 0.0
+            probs[inactive, 0] = 1.0
+        best_candidate_idx = torch.argmax(probs, dim=-1).to(dtype=torch.int64)
+        best_candidate_idx = best_candidate_idx.masked_fill(inactive, -1)
 
         return {
             "action_logits": masked_logits,

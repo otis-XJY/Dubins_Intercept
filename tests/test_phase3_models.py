@@ -51,7 +51,7 @@ def test_phase3_model_forward_and_masking():
     assert torch.allclose(probs[0].sum(), torch.tensor(1.0), atol=1e-5)
 
     assert torch.isfinite(probs[1]).all()
-    assert 0 <= idx[1].item() < m
+    assert idx[1].item() == -1
 
 
 @pytest.mark.parametrize(

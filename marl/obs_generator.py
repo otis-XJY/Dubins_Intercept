@@ -232,6 +232,12 @@ class TODCObservationGenerator:
             allies_local,
             ally_mask,
             reward_nodes,
+            enemy_assigned_self,
+            enemy_assigned_per_ally,
+            enemy_self_mask,
+            ally_enemy_mask,
+            asset_target_self,
+            asset_target_per_ally,
             alive_pids,
             num_p,
         )
@@ -241,6 +247,8 @@ class TODCObservationGenerator:
         enemies, enemy_mask, targets, target_mask = self._zero_dead_evaders(
             enemies, enemy_mask, targets, target_mask, alive_eids, num_p, num_e
         )
+
+        pursuer_active = np.asarray(np.any(self_pts_mask, axis=1), dtype=np.int8)
 
         return {
             "self_uav": self_uav,
@@ -263,6 +271,7 @@ class TODCObservationGenerator:
             "enemy_mask": enemy_mask,
             "target_mask": target_mask,
             "asset_mask": asset_mask,
+            "pursuer_active": pursuer_active,
         }
 
     def _zero_dead_pursuers(
@@ -273,10 +282,16 @@ class TODCObservationGenerator:
         allies_local: np.ndarray,
         ally_mask: np.ndarray,
         reward_nodes: np.ndarray,
+        enemy_assigned_self: np.ndarray,
+        enemy_assigned_per_ally: np.ndarray,
+        enemy_self_mask: np.ndarray,
+        ally_enemy_mask: np.ndarray,
+        asset_target_self: np.ndarray,
+        asset_target_per_ally: np.ndarray,
         alive_pids: Set[int],
         num_p: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """无配对的 pid（已拦截完成等）对应行置 0，mask 全 False。"""
+        """无配对的 pid（已拦截完成等）对应行置 0，mask 全 False；分配敌与资产目标一并清除。"""
         for pid in range(num_p):
             if pid in alive_pids:
                 continue
@@ -286,6 +301,12 @@ class TODCObservationGenerator:
             allies_local[pid] = 0.0
             ally_mask[pid] = False
             reward_nodes[pid] = 0.0
+            enemy_assigned_self[pid] = 0.0
+            enemy_assigned_per_ally[pid] = 0.0
+            enemy_self_mask[pid, :] = False
+            ally_enemy_mask[pid, :] = False
+            asset_target_self[pid] = 0.0
+            asset_target_per_ally[pid] = 0.0
         return self_uav, self_pts, self_pts_mask, allies_local, ally_mask, reward_nodes
 
     @staticmethod
