@@ -126,11 +126,22 @@ eval_episodes: 1
 # 每多少个「全局 step」（所有 scheme 步数累加）上传一张 env.render() 到 {scheme}/step_image
 # 数值越小 wandb 上图片越密、流量/存储越大；0 表示关闭
 step_frame_interval: 10
+# step 内 tick 级别图片采样频率（0 关闭）。tick 指 env.step() 内部 while 的物理推进次数。
+# 非常密集，建议 >= 50；否则 wandb 存储与网络流量会爆炸。
+wandb_tick_image_every: 50
 # 评估录像 eval_video 的帧率
 eval_video_fps: 10
 # 每 N 个训练 episode 上传整段训练 rollout 视频 {scheme}/train_episode_video；0 关闭
 wandb_train_video_every: 10
 train_wandb_video_fps: 10
+
+# --- 网页实时（端口转发）---
+# 启用后会在训练脚本启动一个 MJPEG 流与状态页，默认绑定 127.0.0.1，适合 SSH -L 转发。
+live_server_enable: true
+live_server_host: 0.0.0.0
+live_server_port: 8765
+# 限制推送到网页的帧率（fps）；0 表示不限制（不建议）
+live_stream_fps_limit: 10.0
 
 # --- 检查点与轨迹文件 ---
 save_dir: output/checkpoints

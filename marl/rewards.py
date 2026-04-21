@@ -32,6 +32,9 @@ class RewardConfig:
     terminal_asset_loss_penalty: float = 500.0
     asset_breach_radius: float = 40.0
 
+    # Fallback assignment penalty (triggered when selected reward features contain -2 sentinel)
+    fallback_penalty: float = 50.0
+
     # Optional legacy progress term (disabled by default)
     dist_progress_scale: float = 0.0
 
@@ -142,6 +145,15 @@ class TODCRewardFunction:
                 selected_idx[i] = int(np.argmax(weighted))
 
         selected = reward_nodes[np.arange(num_p), selected_idx]  # [P, 8]
+
+        # fallback: any -2 sentinel in selected reward features -> per-step penalty
+        fallback_mask = np.any(selected[:, 3:] == -2.0, axis=1)
+        for i in range(num_p):
+            if not active_bool[i]:
+                details[f"p_{i}"]["r_fallback"] = 0.0
+                continue
+            details[f"p_{i}"]["r_fallback"] = -float(self.config.fallback_penalty) if bool(fallback_mask[i]) else 0.0
+            rewards[f"p_{i}"] += details[f"p_{i}"]["r_fallback"]
 
         dist_v = selected[:, 7]
         delta_t = selected[:, 3]

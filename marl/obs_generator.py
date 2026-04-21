@@ -79,6 +79,7 @@ class TODCObservationGenerator:
         inferred_targets: Optional[np.ndarray] = None,
         pairs_realE2P: Optional[np.ndarray] = None,
         pairs_ic_ref: Optional[np.ndarray] = None,
+        capflag: Optional[np.ndarray] = None,
     ) -> Dict[str, np.ndarray]:
         """组装节点特征并调用 ``_build_model_aligned_obs``。
 
@@ -109,6 +110,7 @@ class TODCObservationGenerator:
             pos_p=pos_p,
             pos_e=pos_e,
             pairs_realE2P=pairs_realE2P,
+            capflag=capflag,
         )
         return model_obs
 
@@ -137,6 +139,7 @@ class TODCObservationGenerator:
         pos_p: np.ndarray,
         pos_e: np.ndarray,
         pairs_realE2P: Optional[np.ndarray],
+        capflag: Optional[np.ndarray],
     ) -> Dict[str, np.ndarray]:
         """构建与 ``UAVInterceptionNetwork`` 键一致的观测（首维为 pursuer 批 ``P``）。
 
@@ -272,6 +275,7 @@ class TODCObservationGenerator:
             "target_mask": target_mask,
             "asset_mask": asset_mask,
             "pursuer_active": pursuer_active,
+            "self_Capflag": capflag,
         }
 
     def _zero_dead_pursuers(

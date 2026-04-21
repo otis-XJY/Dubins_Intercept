@@ -325,6 +325,27 @@ def obtainTask_timeShift2(IsoPairs_time_Eid_Pid_Posid, IsoMap_i_tt_insertedP, Is
     # 调用之前转换好的 obtainCost 函数
     cost, costAll = obtainCost(flattened_pairs, pathidP, CapRef,Pid_ref_flat)
 
+    # --- 3.1 过滤时间过晚的候选点 ---
+    # 与 obtainCost() 内部 time_threshold 定义保持一致：time_threshold = (CapDistTime/v_P)/timeIsoRes
+    # 这里直接剔除 Delta_t < -time_threshold 的行，避免后续候选集/匈牙利分配被“必定太晚”的点污染。
+    CapDistTime_ = np.asarray(CapRef["CapDistTime"])
+    CapDistTime = CapDistTime_[Pid_ref_flat.astype(int)]
+    v_P = float(CapRef["v_P"])
+    timeIsoRes = float(CapRef["timeIsoRes"])
+    time_threshold = (CapDistTime / v_P) / timeIsoRes
+    Delta_t = costAll[:, 0]
+    keep = Delta_t >= -time_threshold
+    if not np.all(keep):
+        flattened_pairs = flattened_pairs[keep]
+        pathidP = pathidP[keep]
+        pathidE = pathidE[keep]
+        cost = cost[keep]
+        costAll = costAll[keep]
+        PEid = PEid[keep]
+
+    if flattened_pairs.shape[0] == 0:
+        return np.empty((0, 18))
+
     # --- 4. 拼接最终候选表 ---
     # MATLAB 拼接顺序：
     # [flattened_pairs(:,1:7), pathidP(:,3), cost, pathidE(:,2), pathidP(:,2), PEid, pathidE(:,3), pathidP(:,3), costAll]

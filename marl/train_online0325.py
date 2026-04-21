@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import random
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
@@ -61,10 +62,19 @@ class TrainConfig:
     replay_dir: str = "output/eval_traces"
     # Visualization settings
     step_frame_interval: int = 50
+    # step 内 tick 级别图片采样频率（0 关闭）。tick 指 env.step() 内部 while 的物理推进次数。
+    # 注意：该日志非常密集，建议 >= 50；否则 wandb 存储与网络流量会爆炸。
+    wandb_tick_image_every: int = 0
     eval_video_fps: int = 10
     # 每 N 个训练 episode 将整段 rollout 帧序列编码为 mp4 上传 wandb（0 关闭）
     wandb_train_video_every: int = 0
     train_wandb_video_fps: int = 10
+    # Live web streaming (mjpeg + status json). Designed for SSH port-forward.
+    live_server_enable: bool = False
+    live_server_host: str = "127.0.0.1"
+    live_server_port: int = 8765
+    # Limit pushing frames to web (fps). 0 disables throttling.
+    live_stream_fps_limit: float = 10.0
     # 合并进 TODCMARLEnv(config=...) 的额外项，例如 map_root、collision_dist、cap_dist（见 docs/MARL_OVERVIEW.md）
     env: Optional[Dict] = None
 
@@ -109,6 +119,24 @@ def _wandb_log_video(run, key: str, frames: Sequence[np.ndarray], fps: int, epis
         run.log({key: _wandb.Video(path, fps=fps, format="mp4"), "episode": episode})
     finally:
         os.remove(path)
+
+
+def _live_status_pairing(env: TODCMARLEnv) -> Dict[str, object]:
+    """将 env 内伴随/配对相关数组转为 JSON 可序列化结构，供网页 status.json 展示。"""
+
+    def to_j(a):
+        if a is None:
+            return None
+        return np.asarray(a).tolist()
+
+    return {
+        "UnCapPidNew": to_j(env.UnCapPidNew),
+        "UnCapEidNew": to_j(env.UnCapEidNew),
+        "pairs_realE2P": to_j(env.pairs_realE2P),
+        "_pairs_ic_compact": to_j(env._pairs_ic_compact),
+        "UnCapPid": to_j(env.UnCapPid),
+        "UnCapEid": to_j(env.UnCapEid),
+    }
 
 
 @dataclass
@@ -435,11 +463,34 @@ def train_online(cfg: TrainConfig):
 
     run = _init_wandb(cfg, list(models.keys()), enabled=dist_ctx.is_main)
 
+    live_server = None
+    live_store = None
+    if dist_ctx.is_main and bool(cfg.live_server_enable):
+        from marl.live_server import LiveFrameStore, LiveHTTPServer
+
+        live_store = LiveFrameStore()
+        live_server = LiveHTTPServer(host=cfg.live_server_host, port=int(cfg.live_server_port), store=live_store)
+        final_port = live_server.start()
+        urls = live_server.urls()
+        if final_port != int(cfg.live_server_port):
+            print(f"[LIVE] 端口 {int(cfg.live_server_port)} 不可用，已自动切换到 {final_port}。")
+        if str(cfg.live_server_host) == "0.0.0.0":
+            print(f"[LIVE] 网页服务监听地址: {urls['bind_url']}")
+            print(f"[LIVE] 本机访问地址: {urls['open_url']}")
+            print(f"[LIVE] 远程访问地址(示例): {urls['remote_hint']}")
+        else:
+            print(f"[LIVE] 网页已启动: {urls['open_url']}")
+        print(f"[LIVE] 端口转发示例: ssh -L {final_port}:127.0.0.1:{final_port} <user>@<server>")
+
     envs: Dict[str, TODCMARLEnv] = {}
     opts: Dict[str, torch.optim.Optimizer] = {}
 
-    need_train_rgb = (cfg.step_frame_interval > 0) or (
-        cfg.wandb_train_video_every > 0 and cfg.wandb_mode != "disabled"
+    tick_every_cfg = int(getattr(cfg, "wandb_tick_image_every", 0) or 0)
+    need_train_rgb = (
+        (cfg.step_frame_interval > 0)
+        or (cfg.wandb_train_video_every > 0 and cfg.wandb_mode != "disabled")
+        or (tick_every_cfg > 0 and cfg.wandb_mode != "disabled")
+        or bool(cfg.live_server_enable)
     )
     for scheme_name, model in models.items():
         envs[scheme_name] = TODCMARLEnv(
@@ -480,6 +531,61 @@ def train_online(cfg: TrainConfig):
             if record_train_video:
                 env.render_mode = "rgb_array"
                 train_video_frames.append(env.render())
+
+            # tick-level callback: used for wandb tick_image and live mjpeg stream.
+            tick_every = int(getattr(cfg, "wandb_tick_image_every", 0) or 0)
+            enable_tick_cb = dist_ctx.is_main and ((run is not None and tick_every > 0) or (live_server is not None))
+            last_live_push_t = 0.0
+
+            def _on_tick_cb(tick_env: TODCMARLEnv, tick_idx: int):
+                nonlocal last_live_push_t
+                now = time.time()
+                if live_store is not None:
+                    st = {
+                        "scheme": scheme_name,
+                        "episode": int(ep),
+                        "global_step": int(global_step),
+                        "decision_step": int(tick_env.decision_step),
+                        "t_all": float(tick_env.t_all),
+                        "tick_idx": int(tick_idx),
+                    }
+                    st.update(_live_status_pairing(tick_env))
+                    fps = float(getattr(cfg, "live_stream_fps_limit", 0.0) or 0.0)
+                    push_jpeg = fps <= 0.0 or (now - last_live_push_t) >= (1.0 / fps)
+                    if push_jpeg:
+                        frame = tick_env.render()
+                        if frame is None:
+                            raise RuntimeError("live stream: env.render() 返回 None，render_mode 应为 rgb_array")
+                        import imageio.v2 as iio
+                        from io import BytesIO
+
+                        bio = BytesIO()
+                        iio.imwrite(bio, frame, format="jpeg", quality=85)
+                        jpeg = bio.getvalue()
+                        live_store.update(jpeg=jpeg, status=st)
+                        last_live_push_t = now
+                    else:
+                        live_store.update(status=st)
+
+                if run is not None and tick_every > 0 and (tick_idx % tick_every == 0):
+                    import wandb as _wandb
+
+                    frame = tick_env.render()
+                    if frame is None:
+                        raise RuntimeError("tick render returned None (render_mode should be rgb_array)")
+                    caption = (
+                        f"ep={ep} global_step={global_step} decision_step={tick_env.decision_step} "
+                        f"t_all={tick_env.t_all:.3f} tick_idx={tick_idx}"
+                    )
+                    run.log(
+                        {
+                            f"{scheme_name}/tick_image": _wandb.Image(frame, caption=caption),
+                            "global_step": global_step,
+                            "episode": ep,
+                        }
+                    )
+
+            env.set_on_tick(_on_tick_cb if enable_tick_cb else None)
 
             # MAPPO：整段 episode 为一条 rollout，再 GAE + PPO 更新
             unwrap = model.module if hasattr(model, "module") else model
@@ -570,6 +676,8 @@ def train_online(cfg: TrainConfig):
 
                 if record_train_video:
                     train_video_frames.append(env.render())
+
+            env.set_on_tick(None)
 
             if len(ro_obs) > 0:
                 rewards_np = np.stack(ro_rew, axis=0)
@@ -712,6 +820,9 @@ def train_online(cfg: TrainConfig):
     if run is not None:
         run.finish()
 
+    if live_server is not None:
+        live_server.stop()
+
     _cleanup_distributed(dist_ctx)
 
     return history
@@ -761,6 +872,12 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--save-replay", type=_str2bool, default=True)
     parser.add_argument("--replay-dir", type=str, default="output/eval_traces")
     parser.add_argument("--step-frame-interval", type=int, default=1, help="Upload a training step image every N global steps (0 to disable)")
+    parser.add_argument(
+        "--wandb-tick-image-every",
+        type=int,
+        default=0,
+        help="Upload a tick-level image every N inner ticks (0 to disable). Tick is a physics step inside env.step().",
+    )
     parser.add_argument("--eval-video-fps", type=int, default=10, help="FPS for eval video uploaded to wandb")
     parser.add_argument(
         "--wandb-train-video-every",
@@ -769,6 +886,10 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
         help="Every N training episodes log a full rollout video to wandb (0 to disable)",
     )
     parser.add_argument("--train-wandb-video-fps", type=int, default=10, help="FPS for training episode videos on wandb")
+    parser.add_argument("--live-server-enable", type=_str2bool, default=False, help="Enable live MJPEG web server for port-forward viewing")
+    parser.add_argument("--live-server-host", type=str, default="127.0.0.1", help="Live server bind host, e.g. 127.0.0.1 or 0.0.0.0")
+    parser.add_argument("--live-server-port", type=int, default=8765, help="Live server port (auto-increment if occupied)")
+    parser.add_argument("--live-stream-fps-limit", type=float, default=10.0, help="FPS limit for pushing frames to live web (0 disables)")
 
     # Apply file/config defaults after all arguments are declared so they override add_argument's built-in defaults
     if defaults:
@@ -846,9 +967,14 @@ def _parse_args() -> TrainConfig:
         save_replay=bool(args.save_replay),
         replay_dir=args.replay_dir,
         step_frame_interval=args.step_frame_interval,
+        wandb_tick_image_every=int(args.wandb_tick_image_every),
         eval_video_fps=args.eval_video_fps,
         wandb_train_video_every=args.wandb_train_video_every,
         train_wandb_video_fps=args.train_wandb_video_fps,
+        live_server_enable=bool(args.live_server_enable),
+        live_server_host=str(args.live_server_host),
+        live_server_port=int(args.live_server_port),
+        live_stream_fps_limit=float(args.live_stream_fps_limit),
     )
 
 

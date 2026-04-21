@@ -2,7 +2,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import gymnasium as gym
 import joblib
@@ -22,6 +22,7 @@ if project_root not in sys.path:
 from Draw.Draw_map import Draw_map
 from intercept.IsoPair.obtainIsoPairsAll import obtainPTP2TP_IsoPos_timeShift2
 from intercept.IsoPair.obtainIsoPath import insertIsoMapP2TP
+from intercept.IsoPair.obtainIsoPath import obtainPE2IsoPath
 from intercept.IsoPair.obtainNearTPall import obtainNearETP, obtainNearTP
 from intercept.IsoPair.obtainPE2TP import obtainPE2TP
 from intercept.IsoPair.obtainTaskAll import obtainTask_timeShift2
@@ -85,6 +86,11 @@ class TODCMARLEnv(gym.Env):
         self.writer = None
         self._video_ctx = None
 
+        # Optional tick callback for step-internal visualization/logging.
+        # Called from inside `step()`'s inner while-loop after `_advance_from_paths()`.
+        self._on_tick: Optional[Callable[["TODCMARLEnv", int], None]] = None
+        self._tick_counter: int = 0
+
         self.episode_step = 0
         self.last_min_dist = None
         self._profile_cursor = -1
@@ -102,6 +108,9 @@ class TODCMARLEnv(gym.Env):
         self._inferred_targets_e: Optional[np.ndarray] = None
         # 当前路径段起始时的全局仿真时间 t_all；t 置 0 时同步更新，使得 t_all = _t_all_at_path_start + t
         self._t_all_at_path_start = 0.0
+
+    def set_on_tick(self, cb: Optional[Callable[["TODCMARLEnv", int], None]]) -> None:
+        self._on_tick = cb
 
     def set_reward_params(self, **kwargs):
         """Runtime reward tuning without touching environment dynamics."""
@@ -339,6 +348,7 @@ class TODCMARLEnv(gym.Env):
 
         self.episode_step = 0
         self.decision_step = 0
+        self._tick_counter = 0
         self.t = 0.0
         self.t_all = 0.0
         self._t_all_at_path_start = 0.0
@@ -370,6 +380,7 @@ class TODCMARLEnv(gym.Env):
         self._ic_best_per_pair = None
         self._inferred_targets_e = None
         self._pairs_ic_compact = None  # 与 pairs_realE2P 逐行对齐的 IC 表 11–12 列紧凑 (ide,idp)
+        self._fallback_paths = {}  # (pid_global, eid_global) -> 3xL path, only for TPid == -2 fallback rows
 
         # main0319: 内层 _phase_update -> _advance_from_paths -> _phase_check_decision 直至 DWA 需重规划 (line 264)，再构建候选
         while not np.all(self.Capflag) and (self.t_all < self.length_E_max /self.v_E):
@@ -428,6 +439,9 @@ class TODCMARLEnv(gym.Env):
         while not np.all(self.Capflag) and (self.t_all < self.length_E_max / self.v_E):
             self._phase_update()
             self._advance_from_paths()
+            self._tick_counter += 1
+            if self._on_tick is not None:
+                self._on_tick(self, self._tick_counter)
             need_replan, terminal = self._phase_check_decision()
             if terminal:
                 stats.collision = bool(self._check_collision())
@@ -517,11 +531,6 @@ class TODCMARLEnv(gym.Env):
         self.PathEpre = [None] * len(self.UnCapEidNew)
         for _id, eid in enumerate(self.UnCapEidNew):
             self.PathEpre[_id] = self.PathE[int(np.where(eid == self.UnCapEid)[0][0])]
-
-    # def _replan_with_isomap(self):
-    #     """Full replan: build candidates + Hungarian assignment + paths (legacy / smoke tests)."""
-    #     self._compute_isomap_intercept_candidates()
-    #     self._apply_hungarian_and_paths()
 
     def _predict_facility_ranks_for_e(self) -> Tuple[np.ndarray, np.ndarray]:
         """单次 predictLikelyTargetNew：返回 (每机推断目标 xy float32 (num_E,2), rank_idx)。"""
@@ -702,6 +711,111 @@ class TODCMARLEnv(gym.Env):
         mask = np.isin(ep_keys, pr_keys)
         self.ICFinalActionCandidates = self.IC_candidates[mask]
 
+        #TODO:如果pairs_realE2P与UncapPid和UncapEid不一致，则需要补充对应的兜底策略，
+        # 兜底：对 Hungarian 未覆盖的 UnCapPid/UnCapEid 生成“追捕者到敌机当前位置”的候选与配对。
+        # 兜底候选使用 -2 标记（TPid=-2/cost=-2 等），reward 中会按 -2 触发每步惩罚。
+        if self.pairs_realE2P is not None:
+            assigned_pids = {int(x) for x in np.asarray(self.pairs_realE2P[:, 1], dtype=np.int64).ravel()}
+            assigned_eids = {int(x) for x in np.asarray(self.pairs_realE2P[:, 0], dtype=np.int64).ravel()}
+            no_ans_pids = sorted({int(x) for x in np.asarray(self.UnCapPid, dtype=np.int64).ravel()} - assigned_pids)
+            no_ans_eids = sorted({int(x) for x in np.asarray(self.UnCapEid, dtype=np.int64).ravel()} - assigned_eids)
+        else:
+            no_ans_pids = []
+            no_ans_eids = []
+
+        if len(no_ans_pids) > 0 and len(no_ans_eids) > 0:
+            pos_p_full, pos_e_full = self._positions_full_for_obs()
+            pairs = [(pid, eid) for pid in no_ans_pids for eid in no_ans_eids]
+            posp_batch = np.stack([pos_p_full[pid] for pid, _ in pairs], axis=0)
+            pose_batch = np.stack([pos_e_full[eid] for _, eid in pairs], axis=0)
+
+            path_list, _iso_map, _end_time = obtainPE2IsoPath(posp_batch, pose_batch, self.Map, float(self.v_P))
+            if path_list is None or len(path_list) != len(pairs):
+                raise RuntimeError(f"fallback obtainPE2IsoPath returned {0 if path_list is None else len(path_list)} paths for {len(pairs)} pairs")
+
+            path_lens = np.zeros((len(pairs),), dtype=np.int64)
+            fallback_paths = {}
+            for i, (pid, eid) in enumerate(pairs):
+                path = path_list[i]
+                if path is None:
+                    raise RuntimeError(f"fallback path is None for pid={pid}, eid={eid}")
+                path = np.asarray(path, dtype=float)
+                if path.ndim != 2 or path.shape[0] < 3 or path.shape[1] < 2:
+                    raise RuntimeError(f"fallback path shape invalid for pid={pid}, eid={eid}: {path.shape}")
+                path_lens[i] = int(path.shape[1])
+                fallback_paths[(int(pid), int(eid))] = path
+
+            cost_mat = path_lens.reshape(len(no_ans_pids), len(no_ans_eids)).astype(np.float64)
+            p_idx, e_idx = linear_sum_assignment(cost_mat)
+
+            # 兜底配对（全局 pid/eid）
+            fb_pairs = [(int(no_ans_pids[i]), int(no_ans_eids[j])) for i, j in zip(p_idx, e_idx)]
+
+            # 合并 pairs_realE2P：replace_all = 原 Hungarian + 兜底配对
+            merged_pairs = []
+            merged_compact = []
+            if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
+                for row_i in range(self.pairs_realE2P.shape[0]):
+                    merged_pairs.append((int(self.pairs_realE2P[row_i, 0]), int(self.pairs_realE2P[row_i, 1])))
+                    if self._pairs_ic_compact is None:
+                        raise RuntimeError("_pairs_ic_compact is None while pairs_realE2P is not None")
+                    merged_compact.append((int(self._pairs_ic_compact[row_i, 0]), int(self._pairs_ic_compact[row_i, 1])))
+
+            for pid, eid in fb_pairs:
+                if (eid, pid) in merged_pairs:
+                    continue
+                # compact 索引：在当前 UnCap 列表中的位置
+                cpid = int(np.where(np.asarray(self.UnCapPid, dtype=int) == pid)[0][0])
+                ceid = int(np.where(np.asarray(self.UnCapEid, dtype=int) == eid)[0][0])
+                merged_pairs.append((eid, pid))
+                merged_compact.append((ceid, cpid))
+
+            self.pairs_realE2P = np.asarray(merged_pairs, dtype=np.int64)
+            self._pairs_ic_compact = np.asarray(merged_compact, dtype=np.int64)
+
+            # 兜底候选行追加到 ICFinalActionCandidates；保持列数与 obtainTask_timeShift2 对齐（至少 25 列）
+            ncols = int(self.IC_candidates.shape[1]) if self.IC_candidates is not None and self.IC_candidates.ndim == 2 else 0
+            if ncols < 25:
+                raise RuntimeError(f"IC_candidates has {ncols} columns (<25); cannot append fallback candidates")
+
+            num_time = int(self.Map.get("numTime"))
+            tp_max = max(0, num_time - 1)
+            fb_rows = []
+            for pid, eid in fb_pairs:
+                cpid = int(np.where(np.asarray(self.UnCapPid, dtype=int) == pid)[0][0])
+                ceid = int(np.where(np.asarray(self.UnCapEid, dtype=int) == eid)[0][0])
+                path = fallback_paths[(pid, eid)]
+                L = int(path.shape[1])
+                tp = int(round((float(L) / float(self.v_P)) / float(self.timeIsoRes)))
+                tp = max(0, min(tp, tp_max))
+                dist_pe = float(np.hypot(pos_p_full[pid, 0] - pos_e_full[eid, 0], pos_p_full[pid, 1] - pos_e_full[eid, 1]))
+
+                row = np.zeros((ncols,), dtype=float)
+                row[:] = 0.0
+                row[0] = 0.0  # te
+                row[1] = float(tp)  # tp
+                row[2] = -2.0  # ETPid
+                row[3] = -2.0  # PTPid
+                row[4] = 0.0  # IsoPosidxE
+                row[5] = 0.0  # IsoPosidxP
+                row[6] = dist_pe  # Iso_dist
+                row[7] = float(L)  # path_len
+                row[8] = -2.0  # cost
+                row[9] = -2.0  # ValPosid
+                row[10] = -2.0  # TPid (fallback path)
+                row[11] = float(ceid)  # Eid_ref (compact)
+                row[12] = float(cpid)  # Pid_ref (compact)
+                row[13] = 0.0  # Eiso
+                row[14] = 0.0  # Piso (unused)
+                # costAll / rewards fields use -2 sentinel (reward will penalize)
+                if ncols >= 25:
+                    row[15:25] = -2.0
+                fb_rows.append(row)
+
+            if len(fb_rows) > 0:
+                self.ICFinalActionCandidates = np.vstack([self.ICFinalActionCandidates, np.vstack(fb_rows)])
+                self._fallback_paths = dict(fallback_paths)
+
         # 应该是model获得的action,而不是直接使用任务分配的结果
         # self._apply_paths_from_assigned_rows(assigned)
 
@@ -728,24 +842,37 @@ class TODCMARLEnv(gym.Env):
             else path_e2tp[idx][:, : int(iso_idx[i])]
             for i, idx in enumerate(e_idx)
         ]
-        for i, idx in enumerate(np.argsort(e_idx)):
-            self.PathE[i] = path_e_active[idx]
+        # fallback: 若该行来自兜底候选（ETPid/ValPosid 使用 -2 标记），则保持上一轮的 PathE 不变
+        order_e = np.argsort(e_idx)
+        for out_i, row_i in enumerate(order_e):
+            if int(etp_idx[row_i]) == -2 or int(vp_idx[row_i]) == -2:
+                continue
+            self.PathE[out_i] = path_e_active[row_i]
 
         p_idx2 = assigned[:, 12].astype(int)
         tp_to_idx = assigned[:, 10].astype(int)
         iso_p_idx = assigned[:, 14].astype(int)
         tp_from_idx = assigned[:, 3].astype(int)
         path_p_active = [
-            np.hstack(
-                (
-                    path_p2tp[idx],
-                    self.pathFinalMapPTP2Iso[tp_from_idx[i]][tp_to_idx[i]][
-                        :, : max(0, int(iso_p_idx[i] - path_p2tp[idx].shape[1]))
-                    ],
+            (
+                self._fallback_paths[
+                    (
+                        int(self.UnCapPid[int(p_idx2[i])]),
+                        int(self.UnCapEid[int(assigned[i, 11])]),
+                    )
+                ]
+                if tp_to_idx[i] == -2
+                else np.hstack(
+                    (
+                        path_p2tp[idx],
+                        self.pathFinalMapPTP2Iso[tp_from_idx[i]][tp_to_idx[i]][
+                            :, : max(0, int(iso_p_idx[i] - path_p2tp[idx].shape[1]))
+                        ],
+                    )
                 )
+                if tp_to_idx[i] >= 0
+                else path_p2tp[idx][:, : int(iso_p_idx[i])]
             )
-            if tp_to_idx[i] >= 0
-            else path_p2tp[idx][:, : int(iso_p_idx[i])]
             for i, idx in enumerate(p_idx2)
         ]
         for i, idx in enumerate(np.argsort(p_idx2)):
@@ -843,6 +970,16 @@ class TODCMARLEnv(gym.Env):
         return np.linalg.norm(pp - ee, axis=1)
 
     def _extract_candidate_pos(self, row: np.ndarray, pid: int) -> Tuple[float, float, float]:
+        # 兜底候选：直接取“敌机当前位置”作为拦截点位置（与兜底策略定义一致）
+        # 标志位：TPid == -2 或 cost == -2
+        if row is not None and row.shape[0] > 12:
+            if int(row[10]) == -2 or int(row[8]) == -2:
+                cols = self.obs_generator.cols
+                ceid = int(row[cols.eid_ref]) if row.shape[0] > cols.eid_ref else int(row[11])
+                ceid = max(0, min(ceid, int(len(self.UnCapEid) - 1)))
+                eid_global = int(self.UnCapEid[ceid])
+                x, y, th = self._pos_e_xyz_for_global_eid(eid_global)
+                return float(x), float(y), float(th)
 
         # 尝试使用 IsoMap 中的 IsoPos（与 _extract_iso_points 行为一致）
         if hasattr(self, "IsoMap_i_tt_P2Iso") and row.shape[0] > 6:
@@ -931,6 +1068,7 @@ class TODCMARLEnv(gym.Env):
             inferred_targets=inferred_targets,
             pairs_realE2P=self.pairs_realE2P,
             pairs_ic_ref=self._pairs_ic_compact,
+            capflag=self.Capflag,
         )
 
     def _normalize_action(self, action_dict) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
