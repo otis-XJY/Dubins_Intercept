@@ -174,11 +174,11 @@ def test_build_obs_after_partial_manual_capture_shapes(env_ready):
 
 
 def test_captured_total_matches_sum_capflag_on_normal_step(env_ready):
-    """未人工破坏状态时，info 中 captured_total 与 sum(Capflag) 一致。"""
+    """未人工破坏状态时，info 中 captured_total 与 sum(Capflag_full) 一致。"""
     env = env_ready
     act = np.zeros(env.num_P, dtype=np.int64)
     _, _, _, _, info = env.step(act)
-    assert info["p_0"]["captured_total"] == int(np.sum(env.Capflag))
+    assert info["p_0"]["captured_total"] == int(np.sum(env.Capflag_full))
 
 
 def test_capflag_row_i_pairs_with_pairs_row_i_not_global_eid(env_ready):

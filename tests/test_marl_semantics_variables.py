@@ -97,7 +97,7 @@ def test_captured_total_info_equals_sum_capflag(env):
     act = np.zeros(env.num_P, dtype=np.int64)
     _, _, _, _, info = env.step(act)
     total = info["p_0"]["captured_total"]
-    assert total == int(np.sum(env.Capflag))
+    assert total == int(np.sum(env.Capflag_full))
 
 
 def test_phase_update_gate_requires_matching_lengths(env):

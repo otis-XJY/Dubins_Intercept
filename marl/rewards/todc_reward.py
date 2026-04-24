@@ -25,7 +25,7 @@ class RewardConfig:
 
     # Social safety terms
     safe_dist_min: float = 120.0
-    safe_penalty_scale: float = 0.5
+    safe_penalty_scale: float = 0.1
 
     # Efficiency and terminal terms
     step_cost: float = -0.05
@@ -140,7 +140,9 @@ class TODCRewardFunction:
 
         selected = reward_nodes[np.arange(num_p), selected_idx]
 
-        fallback_mask = np.any(selected[:, 3:] == -2.0, axis=1)
+        # 显式兜底标记：当候选不满足时，观测构造会把 cost_* 写为 -2 sentinel。
+        selected_feat = selected[:, 3:]  # (num_p, 5) = cost_t,cost_d,cost_theta,cost_l,cost_V
+        fallback_mask = np.any(selected_feat == -2.0, axis=1)
         for i in range(num_p):
             if not active_bool[i]:
                 details[f"p_{i}"]["r_fallback"] = 0.0
@@ -163,6 +165,8 @@ class TODCRewardFunction:
         )
         for i in range(num_p):
             if not active_bool[i]:
+                r_qual[i] = 0.0
+            if bool(fallback_mask[i]):
                 r_qual[i] = 0.0
             details[f"p_{i}"]["r_qual"] = float(r_qual[i])
 
@@ -225,6 +229,15 @@ class TODCRewardFunction:
                 + details[f"p_{i}"]["r_safe"]
                 + details[f"p_{i}"]["r_time"]
             )
+
+        # Ensure reward outputs are finite. If something still becomes non-finite, collapse to fallback penalty.
+        for i in range(num_p):
+            if not active_bool[i]:
+                continue
+            if not np.isfinite(float(rewards[f"p_{i}"])):
+                rewards[f"p_{i}"] = -float(self.config.fallback_penalty)
+                if details is not None:
+                    details[f"p_{i}"]["non_finite_collapsed"] = True
 
         if return_details:
             return rewards, details

@@ -66,13 +66,13 @@ ddp_find_unused_parameters: false
 # true 且非 DDP 时，对多块 GPU 使用 DataParallel（需 gpu_ids 多于 1 才真正并行）
 multi_gpu: true
 # 使用的 GPU 编号：YAML 里可写整数 1 或字符串 "0,1"；与命令行 --gpu-ids 一致
-gpu_ids: 4
+gpu_ids: 7
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
   - Concatenative Query Network   # 设计 A：拼接融合
   - Gated Query Network           # 设计 B：门控融合
-  - Point-Wise Scoring Network    # 设计 C：逐候选点评分
+  # - Point-Wise Scoring Network    # 设计 C：逐候选点评分
 
 # --- 环境动力学（传入 TODCMARLEnv 的项）---
 # 与仿真步长相关的时间分辨率（见 env.time_res / sim_dt）
@@ -99,17 +99,17 @@ reward:
   # 全局：多机分散 + 多机追同一目标的惩罚
   w_global: 1.0
   div_sigma: 300.0
-  assign_penalty: 5.0
+  assign_penalty: 4.0
   # 安全：机间过近惩罚
   safe_dist_min: 120.0
-  safe_penalty_scale: 0.5
+  safe_penalty_scale: 0.1
   # 每步时间代价、终局捕获/资产损失
-  step_cost: -0.05
-  terminal_capture_bonus: 100.0
+  step_cost: -0.1
+  terminal_capture_bonus: 300.0
   terminal_asset_loss_penalty: 500.0
   asset_breach_radius: 40.0
   # 与距离进步相关的 shaping（0 为关闭）
-  dist_progress_scale: 0.05
+  dist_progress_scale: 0.01
 
 # --- Weights & Biases ---
 wandb_project: dubins-marl-online
@@ -117,7 +117,7 @@ wandb_project: dubins-marl-online
 wandb_entity: null
 wandb_run_name: online_multi_scheme
 # online：实时上传；offline：本地缓存后同步；disabled：不初始化 wandb
-wandb_mode: disabled
+wandb_mode: online
 
 # --- 日志与评估 ---
 # 每多少 episode 打印一行训练摘要（仅 rank0）

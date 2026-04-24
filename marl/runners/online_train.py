@@ -138,20 +138,62 @@ def _wandb_log_video(run, key: str, frames: Sequence[np.ndarray], fps: int, epis
 
 
 def _live_status_pairing(env: TODCMARLEnv) -> Dict[str, object]:
-    """将 env 内伴随/配对相关数组转为 JSON 可序列化结构，供网页 status.json 展示。"""
+    """将 env 内关键状态转为 JSON 可序列化结构，供网页 status.json 展示。
+
+    约定：
+    - 使用稳定链路字段（Capflag_full / assigned_eid_full / captured_total_full）作为网页展示主语义。
+    - 旧链路（Capflag/UnCap*）仍可存在于 env 内，但不作为网页主输出，避免“长度变化”误导。
+    """
 
     def to_j(a):
         if a is None:
             return None
         return np.asarray(a).tolist()
 
+    cap_full = np.asarray(env.Capflag_full).astype(bool) if getattr(env, "Capflag_full", None) is not None else None
+    assigned = np.asarray(env.assigned_eid_full).astype(int) if getattr(env, "assigned_eid_full", None) is not None else None
+
+    rewards = getattr(env, "_last_rewards", None)
+    details = getattr(env, "_last_reward_details", None)
+
+    # Summaries are cheap and help the web UI.
+    reward_mean = None
+    if isinstance(rewards, dict) and len(rewards) > 0:
+        vals = []
+        for k, v in rewards.items():
+            if k.startswith("p_"):
+                vals.append(float(v))
+        reward_mean = float(np.mean(vals)) if len(vals) > 0 else None
+
+    captured_total_full = int(np.sum(cap_full)) if cap_full is not None else int(np.sum(env.Capflag))
+    alive_e = int(env.num_E - captured_total_full)
+
     return {
-        "UnCapPidNew": to_j(env.UnCapPidNew),
-        "UnCapEidNew": to_j(env.UnCapEidNew),
-        "pairs_realE2P": to_j(env.pairs_realE2P),
-        "_pairs_ic_compact": to_j(env._pairs_ic_compact),
-        "UnCapPid": to_j(env.UnCapPid),
-        "UnCapEid": to_j(env.UnCapEid),
+        "capture": {
+            "Capflag_full": cap_full.tolist() if cap_full is not None else None,
+            "captured_total_full": captured_total_full,
+            "alive_e": alive_e,
+            "num_E": int(env.num_E),
+        },
+        "assignment": {
+            # compact alive sets & mapping for geometry / pairing inspection
+            "UnCapPidNew": to_j(env.UnCapPidNew),
+            "UnCapEidNew": to_j(env.UnCapEidNew),
+            "pairs_realE2P": to_j(env.pairs_realE2P),  # rows are (eid_global, pid_global)
+            "_pairs_ic_compact": to_j(env._pairs_ic_compact),
+            "assigned_eid_full": assigned.tolist() if assigned is not None else None,
+        },
+        "reward": {
+            "last_rewards": rewards if isinstance(rewards, dict) else None,
+            "reward_mean": reward_mean,
+            "last_reward_details": details if isinstance(details, dict) else None,
+        },
+        "sim": {
+            "decision_step": int(env.decision_step),
+            "episode_step": int(env.episode_step),
+            "t_all": float(env.t_all),
+            "t": float(env.t),
+        },
     }
 
 

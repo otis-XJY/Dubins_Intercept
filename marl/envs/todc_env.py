@@ -95,7 +95,10 @@ class TODCMARLEnv(gym.Env):
         self._tick_counter: int = 0
 
         self.episode_step = 0
-        self.last_min_dist = None
+        # Stable-length reward state (do NOT replace legacy fields yet)
+        self.Capflag_full: Optional[np.ndarray] = None  # (num_E,) global captured flag, monotonic True
+        self.assigned_eid_full: Optional[np.ndarray] = None  # (num_P,) global eid target per pursuer, -1 if none
+        self.last_min_dist_stable: Optional[np.ndarray] = None  # (num_P,) cached stable distances
         self._profile_cursor = -1
         self.current_profile = None
         self.decision_step = 0
@@ -368,11 +371,13 @@ class TODCMARLEnv(gym.Env):
         ]
 
         self.Capflag = np.array([False] * self.num_E) #连续的
+        self.Capflag_full = np.zeros((self.num_E,), dtype=bool)
         self.pairs_realE2P = None #实际的id，构造观测的标准
         self.UnCapPid = np.arange(self.num_P, dtype=int) #实际的id
         self.UnCapEid = np.arange(self.num_E, dtype=int) #实际的id
         self.UnCapPidNew = self.UnCapPid.copy() #实际的id
         self.UnCapEidNew = self.UnCapEid.copy() #实际的id
+        self.assigned_eid_full = np.full((self.num_P,), -1, dtype=np.int64)
 
         # self.IC = np.empty((0, 18), dtype=float)
         self.IC_candidates = np.empty((0, 18), dtype=float)
@@ -395,14 +400,18 @@ class TODCMARLEnv(gym.Env):
             if need_replan:
                 self._compute_isomap_intercept_candidates()
                 self._apply_hungarian_and_paths()
+                self._sync_assigned_eid_full_from_pairs()
                 break
             self._update_capflag_from_geometry()
+            self._update_capflag_full_from_geometry()
 
         if self._inferred_targets_e is None:
             inferred, _ = self._predict_facility_ranks_for_e()
             self._inferred_targets_e = inferred
 
-        self.last_min_dist = self._pairwise_dist()
+        # 初始化稳定距离：reset 后就以当前 assigned_eid_full 的距离作为“上一时刻”。
+        # 这样第一步的 r_progress 不会出现 inf（prev=inf - curr=finite）。
+        self.last_min_dist_stable = self._compute_curr_min_dist_stable()
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
         info = {
@@ -436,7 +445,9 @@ class TODCMARLEnv(gym.Env):
         stats = StepStats(replanned=False, collision=False, captured=0)
         delta_t_all = 0.0
 
-        prev_cap = self.Capflag.copy()
+        if self.Capflag_full is None:
+            raise RuntimeError("Capflag_full is None; reset() must be called before step().")
+        prev_cap_full = self.Capflag_full.copy()
 
         # One RL step: 先应用动作，再内层循环 main0319：update -> _advance_from_paths -> check，
         # 直至 need_replan、全局回合时间到、或其它终止。
@@ -458,11 +469,14 @@ class TODCMARLEnv(gym.Env):
             if need_replan:
                 self._compute_isomap_intercept_candidates()
                 self._apply_hungarian_and_paths()
+                self._sync_assigned_eid_full_from_pairs()
                 stats.replanned = True
                 break
             self._update_capflag_from_geometry()
+            self._update_capflag_full_from_geometry()
 
-        stats.captured = int(len(prev_cap) - len(self.Capflag))
+        captured_delta_full = int(np.sum(self.Capflag_full) - np.sum(prev_cap_full))
+        stats.captured = int(captured_delta_full)
         self.decision_step += 1
         self.episode_step += 1
         delta_t_all = float(self.t_all) - t_all_before
@@ -482,9 +496,7 @@ class TODCMARLEnv(gym.Env):
 
         max_t = float(self.length_E_max) / float(self.v_E)
         time_exceeded = self.t_all >= max_t - 1e-9
-        done_all = bool(
-            np.all(self.Capflag) or stats.collision or asset_breached or time_exceeded
-        )
+        done_all = bool(np.all(self.Capflag_full) or stats.collision or asset_breached or time_exceeded)
         truncated_all = bool(self.episode_step >= self.max_episode_steps)
 
         obs = self._build_obs()
@@ -499,7 +511,10 @@ class TODCMARLEnv(gym.Env):
             entry = {
                 "replanned": stats.replanned,
                 "collision": stats.collision,
-                "captured_total": int(np.sum(self.Capflag)),
+                # `captured_total` is kept for backward-compat; it follows the stable full semantics now.
+                "captured_total": int(np.sum(self.Capflag_full)),
+                "captured_total_full": int(np.sum(self.Capflag_full)),
+                "captured_delta_full": int(captured_delta_full),
                 "asset_breached": bool(asset_breached),
                 "num_candidates": int(self.IC_candidates.shape[0]),
                 "delta_t_all": float(delta_t_all),
@@ -548,7 +563,8 @@ class TODCMARLEnv(gym.Env):
 
         self.PathEpre = [None] * len(self.UnCapEidNew)
         for _id, eid in enumerate(self.UnCapEidNew):
-            self.PathEpre[_id] = self.PathE[int(np.where(eid == self.UnCapEid)[0][0])]
+            # PathE is stored in global-eid order; keep PathEpre aligned by global eid.
+            self.PathEpre[_id] = self.PathE[int(eid)]
 
     def _predict_facility_ranks_for_e(self) -> Tuple[np.ndarray, np.ndarray]:
         """单次 predictLikelyTargetNew：返回 (每机推断目标 xy float32 (num_E,2), rank_idx)。"""
@@ -668,7 +684,10 @@ class TODCMARLEnv(gym.Env):
 
         if len(results) == 0:
             self._path_e2tp_cache = None
-            raise RuntimeError("No IsoPairs: obtainPTP2TP_IsoPos_timeShift2 produced no valid pair matrices.")
+            # No IsoPairs: do not raise. Let `_apply_hungarian_and_paths` handle global fallback.
+            self.IC_candidates = np.empty((0, 25), dtype=float)
+            self._ic_best_per_pair = np.empty((0, 0), dtype=float)
+            return False
 
         iso_pairs = np.array(results, dtype=object)
         iso_pairs = iso_pairs[np.argsort(iso_pairs[:, 0].astype(int))]
@@ -690,11 +709,23 @@ class TODCMARLEnv(gym.Env):
         self._e2tp_tp_idx_cache = e2tp_tp_idx
         self._p2tp_tp_idx_cache = p2tp_tp_idx
         self._pairs_e2val_cache = pairs_e2val
+        return True
 
     def _apply_hungarian_and_paths(self):
         ic_candidates = self._ic_best_per_pair
-        if ic_candidates is None or ic_candidates.size == 0:
-            raise RuntimeError("Hungarian assignment has no per-pair intercept candidates (_ic_best_per_pair is empty).")
+        # If intercept candidates are missing/empty (e.g. No IsoPairs), directly fall back.
+        if (
+            ic_candidates is None
+            or ic_candidates.size == 0
+            or self.IC_candidates is None
+            or (hasattr(self.IC_candidates, "size") and self.IC_candidates.size == 0)
+        ):
+            self.ICFinalAssign = np.empty((0, 18), dtype=float)
+            self.ICFinalActionCandidates = np.empty((0, 25), dtype=float)
+            self.pairs_realE2P = None
+            self._pairs_ic_compact = None
+            self._apply_fallback_assignment_and_candidates()
+            return
 
         e_set, e_inv = np.unique(ic_candidates[:, 11], return_inverse=True)
         p_set, p_inv = np.unique(ic_candidates[:, 12], return_inverse=True)
@@ -729,113 +760,140 @@ class TODCMARLEnv(gym.Env):
         mask = np.isin(ep_keys, pr_keys)
         self.ICFinalActionCandidates = self.IC_candidates[mask]
 
-        #TODO:如果pairs_realE2P与UncapPid和UncapEid不一致，则需要补充对应的兜底策略，
-        # 兜底：对 Hungarian 未覆盖的 UnCapPid/UnCapEid 生成“追捕者到敌机当前位置”的候选与配对。
-        # 兜底候选使用 -2 标记（TPid=-2/cost=-2 等），reward 中会按 -2 触发每步惩罚。
-        if self.pairs_realE2P is not None:
-            assigned_pids = {int(x) for x in np.asarray(self.pairs_realE2P[:, 1], dtype=np.int64).ravel()}
-            assigned_eids = {int(x) for x in np.asarray(self.pairs_realE2P[:, 0], dtype=np.int64).ravel()}
-            no_ans_pids = sorted({int(x) for x in np.asarray(self.UnCapPid, dtype=np.int64).ravel()} - assigned_pids)
-            no_ans_eids = sorted({int(x) for x in np.asarray(self.UnCapEid, dtype=np.int64).ravel()} - assigned_eids)
-        else:
-            no_ans_pids = []
-            no_ans_eids = []
-
-        if len(no_ans_pids) > 0 and len(no_ans_eids) > 0:
-            pos_p_full, pos_e_full = self._positions_full_for_obs()
-            pairs = [(pid, eid) for pid in no_ans_pids for eid in no_ans_eids]
-            posp_batch = np.stack([pos_p_full[pid] for pid, _ in pairs], axis=0)
-            pose_batch = np.stack([pos_e_full[eid] for _, eid in pairs], axis=0)
-
-            path_list, _iso_map, _end_time = obtainPE2IsoPath(posp_batch, pose_batch, self.Map, float(self.v_P))
-            if path_list is None or len(path_list) != len(pairs):
-                raise RuntimeError(f"fallback obtainPE2IsoPath returned {0 if path_list is None else len(path_list)} paths for {len(pairs)} pairs")
-
-            path_lens = np.zeros((len(pairs),), dtype=np.int64)
-            fallback_paths = {}
-            for i, (pid, eid) in enumerate(pairs):
-                path = path_list[i]
-                if path is None:
-                    raise RuntimeError(f"fallback path is None for pid={pid}, eid={eid}")
-                path = np.asarray(path, dtype=float)
-                if path.ndim != 2 or path.shape[0] < 3 or path.shape[1] < 2:
-                    raise RuntimeError(f"fallback path shape invalid for pid={pid}, eid={eid}: {path.shape}")
-                path_lens[i] = int(path.shape[1])
-                fallback_paths[(int(pid), int(eid))] = path
-
-            cost_mat = path_lens.reshape(len(no_ans_pids), len(no_ans_eids)).astype(np.float64)
-            p_idx, e_idx = linear_sum_assignment(cost_mat)
-
-            # 兜底配对（全局 pid/eid）
-            fb_pairs = [(int(no_ans_pids[i]), int(no_ans_eids[j])) for i, j in zip(p_idx, e_idx)]
-
-            # 合并 pairs_realE2P：replace_all = 原 Hungarian + 兜底配对
-            merged_pairs = []
-            merged_compact = []
-            if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
-                for row_i in range(self.pairs_realE2P.shape[0]):
-                    merged_pairs.append((int(self.pairs_realE2P[row_i, 0]), int(self.pairs_realE2P[row_i, 1])))
-                    if self._pairs_ic_compact is None:
-                        raise RuntimeError("_pairs_ic_compact is None while pairs_realE2P is not None")
-                    merged_compact.append((int(self._pairs_ic_compact[row_i, 0]), int(self._pairs_ic_compact[row_i, 1])))
-
-            for pid, eid in fb_pairs:
-                if (eid, pid) in merged_pairs:
-                    continue
-                # compact 索引：在当前 UnCap 列表中的位置
-                cpid = int(np.where(np.asarray(self.UnCapPid, dtype=int) == pid)[0][0])
-                ceid = int(np.where(np.asarray(self.UnCapEid, dtype=int) == eid)[0][0])
-                merged_pairs.append((eid, pid))
-                merged_compact.append((ceid, cpid))
-
-            self.pairs_realE2P = np.asarray(merged_pairs, dtype=np.int64)
-            self._pairs_ic_compact = np.asarray(merged_compact, dtype=np.int64)
-
-            # 兜底候选行追加到 ICFinalActionCandidates；保持列数与 obtainTask_timeShift2 对齐（至少 25 列）
-            ncols = int(self.IC_candidates.shape[1]) if self.IC_candidates is not None and self.IC_candidates.ndim == 2 else 0
-            if ncols < 25:
-                raise RuntimeError(f"IC_candidates has {ncols} columns (<25); cannot append fallback candidates")
-
-            num_time = int(self.Map.get("numTime"))
-            tp_max = max(0, num_time - 1)
-            fb_rows = []
-            for pid, eid in fb_pairs:
-                cpid = int(np.where(np.asarray(self.UnCapPid, dtype=int) == pid)[0][0])
-                ceid = int(np.where(np.asarray(self.UnCapEid, dtype=int) == eid)[0][0])
-                path = fallback_paths[(pid, eid)]
-                L = int(path.shape[1])
-                tp = int(round((float(L) / float(self.v_P)) / float(self.timeIsoRes)))
-                tp = max(0, min(tp, tp_max))
-                dist_pe = float(np.hypot(pos_p_full[pid, 0] - pos_e_full[eid, 0], pos_p_full[pid, 1] - pos_e_full[eid, 1]))
-
-                row = np.zeros((ncols,), dtype=float)
-                row[:] = 0.0
-                row[0] = 0.0  # te
-                row[1] = float(tp)  # tp
-                row[2] = -2.0  # ETPid
-                row[3] = -2.0  # PTPid
-                row[4] = 0.0  # IsoPosidxE
-                row[5] = 0.0  # IsoPosidxP
-                row[6] = dist_pe  # Iso_dist
-                row[7] = float(L)  # path_len
-                row[8] = -2.0  # cost
-                row[9] = -2.0  # ValPosid
-                row[10] = -2.0  # TPid (fallback path)
-                row[11] = float(ceid)  # Eid_ref (compact)
-                row[12] = float(cpid)  # Pid_ref (compact)
-                row[13] = 0.0  # Eiso
-                row[14] = 0.0  # Piso (unused)
-                # costAll / rewards fields use -2 sentinel (reward will penalize)
-                if ncols >= 25:
-                    row[15:25] = -2.0
-                fb_rows.append(row)
-
-            if len(fb_rows) > 0:
-                self.ICFinalActionCandidates = np.vstack([self.ICFinalActionCandidates, np.vstack(fb_rows)])
-                self._fallback_paths = dict(fallback_paths)
+        # fallback: fill any uncovered pursuer/evader pairs with direct P->E paths and -2 sentinel rows.
+        self._apply_fallback_assignment_and_candidates()
 
         # 应该是model获得的action,而不是直接使用任务分配的结果
         # self._apply_paths_from_assigned_rows(assigned)
+
+    def _apply_fallback_assignment_and_candidates(self) -> None:
+        """Fallback assignment when Hungarian misses pairs or intercept candidates are empty.
+
+        It assigns remaining UnCapPid/UnCapEid via shortest direct paths (P->current E position),
+        and appends -2 sentinel candidate rows into ICFinalActionCandidates. Reward will penalize -2.
+        """
+        print("fallback assignment and candidates",self.UnCapPid,self.UnCapEid)
+        if self.UnCapPid is None or self.UnCapEid is None:
+            return
+
+        assigned_pids: set[int] = set()
+        assigned_eids: set[int] = set()
+        if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
+            assigned_pids = {int(x) for x in np.asarray(self.pairs_realE2P[:, 1], dtype=np.int64).ravel()}
+            assigned_eids = {int(x) for x in np.asarray(self.pairs_realE2P[:, 0], dtype=np.int64).ravel()}
+
+        all_pids = {int(x) for x in np.asarray(self.UnCapPid, dtype=np.int64).ravel()}
+        all_eids = {int(x) for x in np.asarray(self.UnCapEid, dtype=np.int64).ravel()}
+        no_ans_pids = sorted(all_pids - assigned_pids)
+        no_ans_eids = sorted(all_eids - assigned_eids)
+
+        if len(no_ans_pids) == 0 or len(no_ans_eids) == 0:
+            return
+
+        pos_p_full, pos_e_full = self._positions_full_for_obs()
+        pairs = [(pid, eid) for pid in no_ans_pids for eid in no_ans_eids]
+        posp_batch = np.stack([pos_p_full[pid] for pid, _ in pairs], axis=0)
+        pose_batch = np.stack([pos_e_full[eid] for _, eid in pairs], axis=0)
+
+        path_list, _iso_map, _end_time = obtainPE2IsoPath(posp_batch, pose_batch, self.Map, float(self.v_P))
+        if path_list is None or len(path_list) != len(pairs):
+            raise RuntimeError(
+                f"fallback obtainPE2IsoPath returned {0 if path_list is None else len(path_list)} paths for {len(pairs)} pairs"
+            )
+
+        path_lens = np.zeros((len(pairs),), dtype=np.int64)
+        fallback_paths: dict[tuple[int, int], np.ndarray] = {}
+        for i, (pid, eid) in enumerate(pairs):
+            path = path_list[i]
+            if path is None:
+                raise RuntimeError(f"fallback path is None for pid={pid}, eid={eid}")
+            path = np.asarray(path, dtype=float)
+            if path.ndim != 2 or path.shape[0] < 3 or path.shape[1] < 2:
+                raise RuntimeError(f"fallback path shape invalid for pid={pid}, eid={eid}: {path.shape}")
+            path_lens[i] = int(path.shape[1])
+            fallback_paths[(int(pid), int(eid))] = path
+
+        cost_mat = path_lens.reshape(len(no_ans_pids), len(no_ans_eids)).astype(np.float64)
+        p_idx, e_idx = linear_sum_assignment(cost_mat)
+
+        # fallback pairs (global pid/eid)
+        fb_pairs = [(int(no_ans_pids[i]), int(no_ans_eids[j])) for i, j in zip(p_idx, e_idx)]
+
+        merged_pairs: list[tuple[int, int]] = []
+        merged_compact: list[tuple[int, int]] = []
+        if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
+            for row_i in range(self.pairs_realE2P.shape[0]):
+                merged_pairs.append((int(self.pairs_realE2P[row_i, 0]), int(self.pairs_realE2P[row_i, 1])))
+                if self._pairs_ic_compact is None:
+                    raise RuntimeError("_pairs_ic_compact is None while pairs_realE2P is not None")
+                merged_compact.append((int(self._pairs_ic_compact[row_i, 0]), int(self._pairs_ic_compact[row_i, 1])))
+
+        for pid, eid in fb_pairs:
+            if (eid, pid) in merged_pairs:
+                continue
+            # compact index: in current UnCap lists
+            cpid = int(np.where(np.asarray(self.UnCapPid, dtype=int) == pid)[0][0])
+            ceid = int(np.where(np.asarray(self.UnCapEid, dtype=int) == eid)[0][0])
+            merged_pairs.append((eid, pid))
+            merged_compact.append((ceid, cpid))
+
+        self.pairs_realE2P = np.asarray(merged_pairs, dtype=np.int64)
+        self._pairs_ic_compact = np.asarray(merged_compact, dtype=np.int64)
+
+        # Append fallback rows into ICFinalActionCandidates (>=25 cols).
+        ncols = 0
+        if self.IC_candidates is not None and getattr(self.IC_candidates, "ndim", 0) == 2:
+            ncols = int(self.IC_candidates.shape[1])
+        if ncols < 25:
+            ncols = 25
+
+        if self.ICFinalActionCandidates is None or getattr(self.ICFinalActionCandidates, "ndim", 0) != 2:
+            self.ICFinalActionCandidates = np.empty((0, ncols), dtype=float)
+        elif int(self.ICFinalActionCandidates.shape[1]) != ncols:
+            # keep original columns; if ICFinalActionCandidates was built from IC_candidates, prefer that width
+            ncols = int(self.ICFinalActionCandidates.shape[1])
+
+        num_time = int(self.Map.get("numTime"))
+        tp_max = max(0, num_time - 1)
+        fb_rows = []
+        for pid, eid in fb_pairs:
+            cpid = int(np.where(np.asarray(self.UnCapPid, dtype=int) == pid)[0][0])
+            ceid = int(np.where(np.asarray(self.UnCapEid, dtype=int) == eid)[0][0])
+            path = fallback_paths[(pid, eid)]
+            L = int(path.shape[1])
+            tp = int(round((float(L) / float(self.v_P)) / float(self.timeIsoRes)))
+            tp = max(0, min(tp, tp_max))
+            dist_pe = float(
+                np.hypot(
+                    pos_p_full[pid, 0] - pos_e_full[eid, 0],
+                    pos_p_full[pid, 1] - pos_e_full[eid, 1],
+                )
+            )
+
+            row = np.zeros((ncols,), dtype=float)
+            row[:] = 0.0
+            row[0] = 0.0  # te
+            row[1] = float(tp)  # tp
+            row[2] = -2.0  # ETPid
+            row[3] = -2.0  # PTPid
+            row[4] = 0.0  # IsoPosidxE
+            row[5] = 0.0  # IsoPosidxP
+            row[6] = dist_pe  # Iso_dist
+            row[7] = float(L)  # path_len
+            row[8] = -2.0  # cost
+            row[9] = -2.0  # ValPosid
+            row[10] = -2.0  # TPid (fallback path)
+            row[11] = float(ceid)  # Eid_ref (compact)
+            row[12] = float(cpid)  # Pid_ref (compact)
+            row[13] = 0.0  # Eiso
+            row[14] = 0.0  # Piso (unused)
+            if ncols >= 25:
+                row[15:25] = -2.0
+            fb_rows.append(row)
+
+        if len(fb_rows) > 0:
+            self.ICFinalActionCandidates = np.vstack([self.ICFinalActionCandidates, np.vstack(fb_rows)])
+            self._fallback_paths = dict(fallback_paths)
 
     def _apply_paths_from_assigned_rows(self, assigned: np.ndarray):
         path_e2tp = self._path_e2tp_cache
@@ -914,6 +972,7 @@ class TODCMARLEnv(gym.Env):
             self.UnCapEidNew = self.pairs_realE2P[keep, 0].astype(int)
             self.pairs_realE2P = self.pairs_realE2P[keep]
             self._pairs_ic_compact = self._pairs_ic_compact[keep]
+            self._sync_assigned_eid_full_from_pairs()
 
 
     def _phase_check_decision(self) -> Tuple[bool, bool]:
@@ -946,6 +1005,111 @@ class TODCMARLEnv(gym.Env):
         cap_dist = float(self.CapRef["CapDist"])
         cap_angle_half = float(self.CapRef["CapAngle"]) / 2.0
         self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
+
+    def _pos_p_xyz_for_global_pid(self, pid: int) -> Tuple[float, float, float]:
+        """全局 pid → 平面位置+朝向；PosP 紧凑时用 UnCapPidNew 行映射。"""
+        pid = int(max(0, min(int(pid), self.num_P - 1)))
+        if self.PosP.shape[0] == self.num_P:
+            pp = self.PosP[pid]
+            return float(pp[0]), float(pp[1]), float(pp[2])
+        idx = np.where(np.asarray(self.UnCapPidNew, dtype=int) == pid)[0]
+        if idx.size > 0:
+            pp = self.PosP[int(idx[0])]
+            return float(pp[0]), float(pp[1]), float(pp[2])
+        ps = self.PStart_Point[pid]
+        return float(ps[0]), float(ps[1]), float(ps[2])
+
+    def _sync_assigned_eid_full_from_pairs(self) -> None:
+        """从 pairs_realE2P 同步 assigned_eid_full（用于稳定距离计算与校验）。"""
+        if self.assigned_eid_full is None:
+            self.assigned_eid_full = np.full((self.num_P,), -1, dtype=np.int64)
+        else:
+            if self.assigned_eid_full.shape != (self.num_P,):
+                raise ValueError(f"assigned_eid_full shape {self.assigned_eid_full.shape} != ({self.num_P},)")
+            self.assigned_eid_full[:] = -1
+        if self.pairs_realE2P is None or self.pairs_realE2P.size == 0:
+            return
+        pr = np.asarray(self.pairs_realE2P, dtype=np.int64)
+        for i in range(pr.shape[0]):
+            eid, pid = int(pr[i, 0]), int(pr[i, 1])
+            if pid < 0 or pid >= self.num_P:
+                raise ValueError(f"pairs_realE2P has invalid pid={pid}")
+            if eid < 0 or eid >= self.num_E:
+                raise ValueError(f"pairs_realE2P has invalid eid={eid}")
+            self.assigned_eid_full[pid] = eid
+
+    def _update_capflag_full_from_geometry(self) -> int:
+        """更新全局捕获标记 Capflag_full（单调置 True）。返回本次新增捕获数量。"""
+        if self.Capflag_full is None:
+            self.Capflag_full = np.zeros((self.num_E,), dtype=bool)
+        if self.Capflag_full.shape != (self.num_E,):
+            raise ValueError(f"Capflag_full shape {self.Capflag_full.shape} != ({self.num_E},)")
+        cap_dist = float(self.CapRef["CapDist"])
+        cap_angle_half = float(self.CapRef["CapAngle"]) / 2.0
+        newly = 0
+        # Only check alive eids in current compact set to avoid useless scans.
+        alive_eids = np.asarray(self.UnCapEidNew, dtype=np.int64).ravel()
+        alive_pids = np.asarray(self.UnCapPidNew, dtype=np.int64).ravel()
+        if alive_eids.size == 0 or alive_pids.size == 0:
+            return 0
+        # Pre-fetch pursuer poses (compact rows correspond to alive_pids order).
+        p_xyth = np.asarray(self.PosP, dtype=float)
+        if p_xyth.ndim != 2 or p_xyth.shape[0] != alive_pids.size or p_xyth.shape[1] < 3:
+            raise ValueError(
+                f"PosP shape {p_xyth.shape} inconsistent with alive_pids {alive_pids.size}"
+            )
+        p_xy = p_xyth[:, :2]
+        p_th = p_xyth[:, 2]
+        for eid in alive_eids:
+            eid = int(eid)
+            if eid < 0 or eid >= self.num_E:
+                raise ValueError(f"UnCapEidNew contains invalid eid={eid}")
+            if bool(self.Capflag_full[eid]):
+                continue
+            ex, ey, _eth = self._pos_e_xyz_for_global_eid(eid)
+            e_xy = np.array([ex, ey], dtype=float)
+            d = np.linalg.norm(p_xy - e_xy.reshape(1, 2), axis=1)
+            if d.size == 0:
+                continue
+            j = int(np.argmin(d))
+            dx = ex - float(p_xy[j, 0])
+            dy = ey - float(p_xy[j, 1])
+            ang_pe = float(np.degrees(np.arctan2(dy, dx)))
+            angle_diff = (ang_pe - float(np.degrees(p_th[j])) + 180.0) % 360.0 - 180.0
+            if float(d[j]) <= cap_dist and abs(float(angle_diff)) <= cap_angle_half:
+                self.Capflag_full[eid] = True
+                newly += 1
+                # invalidate assigned targets that were captured
+                if self.assigned_eid_full is not None:
+                    self.assigned_eid_full = np.asarray(self.assigned_eid_full, dtype=np.int64)
+                    self.assigned_eid_full[self.assigned_eid_full == eid] = -1
+        return int(newly)
+
+    def _compute_curr_min_dist_stable(self) -> np.ndarray:
+        """稳定距离：每个全局 pursuer 到其 assigned_eid_full 的距离；无效则 inf。shape=(num_P,)"""
+        if self.assigned_eid_full is None:
+            self.assigned_eid_full = np.full((self.num_P,), -1, dtype=np.int64)
+        if self.assigned_eid_full.shape != (self.num_P,):
+            raise ValueError(f"assigned_eid_full shape {self.assigned_eid_full.shape} != ({self.num_P},)")
+        if self.Capflag_full is None:
+            self.Capflag_full = np.zeros((self.num_E,), dtype=bool)
+        if self.Capflag_full.shape != (self.num_E,):
+            raise ValueError(f"Capflag_full shape {self.Capflag_full.shape} != ({self.num_E},)")
+        # 约定：若无有效分配（eid<0 或已捕获），稳定距离记为 0（表示无可比较的目标距离）。
+        # 这样 progress reward 的 delta 在 reset/无分配时为 0，而不会出现 inf-inf=nan。
+        out = np.zeros((self.num_P,), dtype=np.float32)
+        for pid in range(self.num_P):
+            eid = int(self.assigned_eid_full[pid])
+            if eid < 0:
+                continue
+            if eid >= self.num_E:
+                raise ValueError(f"assigned_eid_full[{pid}]={eid} out of range")
+            if bool(self.Capflag_full[eid]):
+                continue
+            px, py, _pth = self._pos_p_xyz_for_global_pid(pid)
+            ex, ey, _eth = self._pos_e_xyz_for_global_eid(eid)
+            out[pid] = float(np.hypot(px - ex, py - ey))
+        return out
 
     def _apply_assignment_from_action(self, action_indices: np.ndarray) -> None:
         """Apply RL-chosen candidate rows instead of Hungarian (requires valid isomap cache).
@@ -1086,7 +1250,7 @@ class TODCMARLEnv(gym.Env):
             inferred_targets=inferred_targets,
             pairs_realE2P=self.pairs_realE2P,
             pairs_ic_ref=self._pairs_ic_compact,
-            capflag=self.Capflag,
+            capflag=self.Capflag_full,
         )
 
     def _normalize_action(self, action_dict) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
@@ -1160,7 +1324,7 @@ class TODCMARLEnv(gym.Env):
         obs_at_action: Dict[str, np.ndarray],
     ):
         """`action_indices` 相对于 ``obs_at_action`` 中的候选掩码；几何类项用当前态势。"""
-        curr_min_dist = self._pairwise_dist()
+        curr_min_dist = self._compute_curr_min_dist_stable()
         curr_obs = self._build_obs()
         obs = dict(curr_obs)
         for key in ("reward_nodes", "self_pts_mask", "self_pts", "pursuer_active"):
@@ -1170,16 +1334,53 @@ class TODCMARLEnv(gym.Env):
             actions=action_indices,
             obs=obs,
             curr_min_dist=curr_min_dist,
-            last_min_dist=self.last_min_dist,
+            last_min_dist=self.last_min_dist_stable,
             num_p=self.num_P,
             sim_time_elapsed=float(sim_time_elapsed),
             sim_dt=sd,
             return_details=True,
         )
 
-        self.last_min_dist = curr_min_dist.copy()
+        # Fail-fast: surface timing and mask context when rewards become inf/nan.
+        r_arr = np.asarray([rewards.get(f"p_{i}", 0.0) for i in range(self.num_P)], dtype=np.float64)
+        if not np.isfinite(r_arr).all():
+            bad = np.where(~np.isfinite(r_arr))[0].astype(int).tolist()
+            print(
+                "[ENV][NON_FINITE_REWARD] bad_pids=",
+                bad,
+                "rewards=",
+                r_arr,
+                "sim_time_elapsed=",
+                float(sim_time_elapsed),
+                "sim_dt=",
+                float(sd),
+                "t_all=",
+                float(getattr(self, "t_all", float("nan"))),
+                "decision_step=",
+                int(getattr(self, "decision_step", -1)),
+                "episode_step=",
+                int(getattr(self, "episode_step", -1)),
+            )
+            try:
+                m = np.asarray(obs_at_action.get("self_pts_mask"), dtype=np.float32)
+                print(
+                    "[ENV][NON_FINITE_REWARD] self_pts_mask row_sum=",
+                    np.sum(m > 0, axis=1).astype(int).tolist(),
+                    "k_curr=",
+                    int(m.shape[1]) if m.ndim == 2 else -1,
+                )
+            except Exception as e:
+                print("[ENV][NON_FINITE_REWARD] failed to summarize self_pts_mask:", repr(e))
+            try:
+                print("[ENV][NON_FINITE_REWARD] action_indices=", np.asarray(action_indices).astype(int).tolist())
+            except Exception as e:
+                print("[ENV][NON_FINITE_REWARD] failed to print action_indices:", repr(e))
+            raise ValueError("Non-finite reward detected in env._compute_rewards (see prints above).")
+
+        self.last_min_dist_stable = curr_min_dist.copy()
         # store last reward details for external inspection
         self._last_reward_details = details
+        self._last_rewards = dict(rewards)
         return rewards, details
 
     def _check_collision(self) -> bool:

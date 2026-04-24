@@ -50,12 +50,27 @@ def _index_html(stream_path: str = "/stream.mjpg") -> str:
       color: #e6e6e6;
     }}
     .wrap {{
+      --side-width: 340px;
+      --col-gap: 1px;
+      --divider-w: 10px;
       display: grid;
-      grid-template-columns: 1fr 340px;
-      gap: 16px;
+      grid-template-columns: 1fr var(--divider-w) var(--side-width);
+      gap: var(--col-gap);
       padding: 16px;
       height: 100vh;
       box-sizing: border-box;
+    }}
+    .divider {{
+      width: var(--divider-w);
+      border-radius: 999px;
+      cursor: col-resize;
+      user-select: none;
+      background: rgba(59, 130, 246, 0.35);
+      border: 1px solid rgba(59, 130, 246, 0.65);
+      box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+    }}
+    .divider:active {{
+      background: rgba(59, 130, 246, 0.55);
     }}
     .card {{
       background: rgba(255,255,255,0.06);
@@ -77,26 +92,41 @@ def _index_html(stream_path: str = "/stream.mjpg") -> str:
       background: #0b0f19;
     }}
     .side {{
-      padding: 12px 12px 4px 12px;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      padding: 12px 12px 12px 12px;
+      box-sizing: border-box;
     }}
     .kv {{
       display: grid;
-      grid-template-columns: 140px 1fr;
-      gap: 8px 10px;
+      grid-template-columns: minmax(190px, 320px) 1fr;
+      column-gap: 14px;
+      row-gap: 8px;
       font-size: 13px;
       line-height: 1.4;
-      padding: 10px 0;
-      border-bottom: 1px solid rgba(255,255,255,0.10);
+      padding: 10px 0 0 0;
+      flex: 1 1 auto;
+      overflow: auto;
     }}
-    .k {{ color: rgba(230,230,230,0.75); }}
+    .k {{
+      color: rgba(230,230,230,0.75);
+      font-size: 12px;
+      line-height: 1.25;
+      white-space: normal;
+      word-break: break-word;
+      overflow-wrap: anywhere;
+      padding-right: 6px;
+      align-self: start;
+    }}
     .v {{
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New";
       white-space: pre-wrap;
-      word-break: break-all;
+      word-break: break-word;
+      overflow-wrap: anywhere;
       font-size: 11px;
-      line-height: 1.35;
-      max-height: 40vh;
-      overflow: auto;
+      line-height: 1.25;
+      align-self: start;
     }}
     .hint {{
       font-size: 12px;
@@ -112,6 +142,7 @@ def _index_html(stream_path: str = "/stream.mjpg") -> str:
       font-size: 12px;
       margin-right: 6px;
     }}
+    /* sliders removed */
   </style>
 </head>
 <body>
@@ -119,6 +150,7 @@ def _index_html(stream_path: str = "/stream.mjpg") -> str:
     <div class="card viewer">
       <img id="live" src="{stream_path}" alt="live stream"/>
     </div>
+    <div id="divider" class="divider" title="按住拖拽调整左右栏宽度"></div>
     <div class="card side">
       <div class="hint">
         <span class="pill">/stream.mjpg</span>
@@ -129,12 +161,102 @@ def _index_html(stream_path: str = "/stream.mjpg") -> str:
     </div>
   </div>
   <script>
+    function isPlainObject(x) {{
+      return x !== null && typeof x === 'object' && !Array.isArray(x);
+    }}
+
+    function summarizeArray(arr) {{
+      const n = arr.length;
+      if (n <= 60) return JSON.stringify(arr);
+      // Special-case boolean arrays (e.g. Capflag_full) to show compact info.
+      const allBool = arr.every(v => typeof v === 'boolean');
+      if (allBool) {{
+        const trueIdx = [];
+        for (let i = 0; i < n; i++) {{
+          if (arr[i] === true) trueIdx.push(i);
+          if (trueIdx.length >= 30) break;
+        }}
+        const trueCount = arr.reduce((a, v) => a + (v === true ? 1 : 0), 0);
+        return `BoolArray(len=${{n}}, true=${{trueCount}}, trueIdx(sample)=${{JSON.stringify(trueIdx)}})`;
+      }}
+      const head = arr.slice(0, 20);
+      return `Array(len=${{n}}, head=${{JSON.stringify(head)}} ...)`;
+    }}
+
+    function prettyValue(v) {{
+      if (v === null || v === undefined) return String(v);
+      if (Array.isArray(v)) return summarizeArray(v);
+      if (isPlainObject(v)) return JSON.stringify(v, null, 2);
+      return String(v);
+    }}
+
+    function flatten(obj, prefix = '', out = {{}}) {{
+      if (!isPlainObject(obj)) {{
+        out[prefix || 'value'] = obj;
+        return out;
+      }}
+      const keys = Object.keys(obj).sort();
+      for (const k of keys) {{
+        const v = obj[k];
+        const kp = prefix ? `${{prefix}}.${{k}}` : k;
+        if (isPlainObject(v)) {{
+          flatten(v, kp, out);
+        }} else {{
+          out[kp] = v;
+        }}
+      }}
+      return out;
+    }}
+
+    function setupResizableDivider() {{
+      const wrap = document.querySelector('.wrap');
+      const divider = document.getElementById('divider');
+
+      // Drag to resize side width (same effect as moving the slider)
+      if (divider && wrap) {{
+        let dragging = false;
+        let startX = 0;
+        let startW = 0;
+        const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+        divider.addEventListener('mousedown', (e) => {{
+          dragging = true;
+          startX = e.clientX;
+          // current CSS var, fallback to computed width
+          const cssW = getComputedStyle(wrap).getPropertyValue('--side-width').trim();
+          startW = Number(cssW.replace('px','')) || 340;
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none';
+          e.preventDefault();
+        }});
+
+        window.addEventListener('mousemove', (e) => {{
+          if (!dragging) return;
+          const dx = e.clientX - startX;
+          // Move right -> increase side width
+          let w = startW + dx;
+          const minW = 260;
+          const maxW = Math.min(720, Math.floor(wrap.getBoundingClientRect().width * 0.65));
+          w = clamp(w, minW, maxW);
+          wrap.style.setProperty('--side-width', `${{Math.round(w)}}px`);
+        }});
+
+        window.addEventListener('mouseup', () => {{
+          if (!dragging) return;
+          dragging = false;
+          document.body.style.cursor = '';
+          document.body.style.userSelect = '';
+        }});
+      }}
+    }}
+
     async function poll() {{
       try {{
         const r = await fetch('/status.json', {{cache: 'no-store'}});
         if (!r.ok) return;
         const s = await r.json();
-        const keys = Object.keys(s).sort();
+        const flat = flatten(s);
+        const keys = Object.keys(flat).sort();
         const kv = document.getElementById('kv');
         kv.innerHTML = '';
         for (const k of keys) {{
@@ -143,12 +265,13 @@ def _index_html(stream_path: str = "/stream.mjpg") -> str:
           dk.textContent = k;
           const dv = document.createElement('div');
           dv.className = 'v';
-          dv.textContent = String(s[k]);
+          dv.textContent = prettyValue(flat[k]);
           kv.appendChild(dk);
           kv.appendChild(dv);
         }}
       }} catch (e) {{}}
     }}
+    setupResizableDivider();
     poll();
     setInterval(poll, 500);
   </script>
