@@ -15,7 +15,9 @@ from scipy.optimize import linear_sum_assignment
 from shapely.geometry import Polygon
 
 
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+project_root = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
@@ -28,8 +30,8 @@ from intercept.IsoPair.obtainPE2TP import obtainPE2TP
 from intercept.IsoPair.obtainTaskAll import obtainTask_timeShift2
 from intercept.Prediction.obtainDWAprePath import obtainDWAprePath
 from intercept.Prediction.predictLikelyTarget import predictLikelyTargetNew
-from marl.obs_generator import TODCObservationGenerator
-from marl.rewards import TODCRewardFunction
+from marl.obs.generator import TODCObservationGenerator
+from marl.rewards.todc_reward import TODCRewardFunction
 
 
 # 本模块实现 Gymnasium 接口的 Dubins 拦截环境：底层为 IsoMap/匈牙利分配与 main0319 风格内层仿真；
@@ -68,6 +70,7 @@ class TODCMARLEnv(gym.Env):
         self.enable_dwa_replan = bool(self.config.get("enable_dwa_replan", True))
         self.max_episode_steps = int(self.config.get("max_episode_steps", 600))
         self.collision_dist = float(self.config.get("collision_dist", 25.0))
+        self._debug_print = bool(self.config.get("debug_print", False))
         self.reward_fn = TODCRewardFunction.from_env_config(self.config)
 
         self._load_assets()
@@ -419,6 +422,11 @@ class TODCMARLEnv(gym.Env):
                 "terminal_asset_loss_penalty": float(self.reward_fn.config.terminal_asset_loss_penalty),
             },
         }
+        if self._debug_print:
+            print(
+                f"[ENV] reset seed={seed} profile={self.current_profile} time_map={self.time_map} "
+                f"candidates={info['num_candidates']} t_all={info['t_all']:.3f} num_P={self.num_P} num_E={self.num_E}"
+            )
         return obs, info
 
     def step(self, action_dict):
@@ -435,6 +443,7 @@ class TODCMARLEnv(gym.Env):
         self._apply_assignment_from_action(action_indices)
 
         t_all_before = float(self.t_all)
+        inner_tick_start = int(self._tick_counter)
 
         while not np.all(self.Capflag) and (self.t_all < self.length_E_max / self.v_E):
             self._phase_update()
@@ -453,7 +462,7 @@ class TODCMARLEnv(gym.Env):
                 break
             self._update_capflag_from_geometry()
 
-        stats.captured = int(np.sum(~prev_cap & self.Capflag))
+        stats.captured = int(len(prev_cap) - len(self.Capflag))
         self.decision_step += 1
         self.episode_step += 1
         delta_t_all = float(self.t_all) - t_all_before
@@ -468,6 +477,7 @@ class TODCMARLEnv(gym.Env):
             num_e=self.num_E,
             asset_breached=asset_breached,
             details=reward_details,
+            debug_print=self._debug_print,
         )
 
         max_t = float(self.length_E_max) / float(self.v_E)
@@ -504,6 +514,14 @@ class TODCMARLEnv(gym.Env):
         # 全局仿真时间 t_all / 路径段执行时间 t：训练脚本主记 t_all，env 内层终止条件用 t（见 decision 内层 while）
         infos["global_t_all"] = float(self.t_all)
         infos["path_exec_t"] = float(self.t)
+        if self._debug_print:
+            rmean = float(np.mean([rewards[f"p_{i}"] for i in range(self.num_P)]))
+            print(
+                f"[ENV] decision_step={self.decision_step} ep_step={self.episode_step} "
+                f"r_mean={rmean:.4f} t_all={self.t_all:.2f} replanned={stats.replanned} "
+                f"captured_step={stats.captured} done={done_all} trunc={truncated_all} "
+                f"K={int(self.IC_candidates.shape[0])} inner_ticks={self._tick_counter - inner_tick_start}"
+            )
         return obs, rewards, terminations, truncations, infos
 
     def _advance_from_paths(self):

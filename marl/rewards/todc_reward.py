@@ -2,6 +2,7 @@
 
 步级项依赖 ``obs`` 中的 ``reward_nodes``、``self_pts_mask``、``enemies``（与策略输入键可部分重叠）。
 """
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -53,7 +54,6 @@ class TODCRewardFunction:
         cfg = env_config or {}
         reward_cfg_raw = cfg.get("reward", {})
         reward_cfg = dict(reward_cfg_raw) if isinstance(reward_cfg_raw, dict) else {}
-        # 只保留RewardConfig定义的字段
         valid_keys = set(RewardConfig.__annotations__.keys())
         reward_cfg = {k: v for k, v in reward_cfg.items() if k in valid_keys}
         return cls(RewardConfig(**reward_cfg))
@@ -76,7 +76,6 @@ class TODCRewardFunction:
         sim_dt: float,
         return_details: bool = False,
     ) -> Dict[str, float]:
-        """按当前动作从 ``reward_nodes`` 取候选特征，叠加全局与安全项，返回每机标量奖励。"""
         rewards = {f"p_{i}": 0.0 for i in range(num_p)}
         details = {f"p_{i}": {} for i in range(num_p)}
 
@@ -103,9 +102,6 @@ class TODCRewardFunction:
 
         k_curr = reward_nodes.shape[1]
         selected_idx = np.zeros((num_p,), dtype=np.int64)
-        # 支持两种动作输入格式：
-        # - 每个 agent 的采样索引（形状 (num_p,) 或标量/整型）；无任务机动作可为 -1
-        # - 每个 agent 的权重向量 / 概率分布（形状 (num_p, k_curr))
         actions_arr = np.asarray(actions)
         if actions_arr.ndim == 1:
             for i in range(num_p):
@@ -136,17 +132,14 @@ class TODCRewardFunction:
                     selected_idx[i] = idx
                     continue
                 if w.shape[0] != k_curr:
-                    raise ValueError(
-                        f"action weight length {w.shape[0]} != k_curr {k_curr} for pursuer {i}"
-                    )
+                    raise ValueError(f"action weight length {w.shape[0]} != k_curr {k_curr} for pursuer {i}")
                 weighted = w * mask[i]
                 if np.sum(weighted) <= 1e-12:
                     raise ValueError(f"action weights for pursuer {i} are zero on all valid candidates")
                 selected_idx[i] = int(np.argmax(weighted))
 
-        selected = reward_nodes[np.arange(num_p), selected_idx]  # [P, 8]
+        selected = reward_nodes[np.arange(num_p), selected_idx]
 
-        # fallback: any -2 sentinel in selected reward features -> per-step penalty
         fallback_mask = np.any(selected[:, 3:] == -2.0, axis=1)
         for i in range(num_p):
             if not active_bool[i]:
@@ -180,7 +173,7 @@ class TODCRewardFunction:
                 if not active_bool[i]:
                     continue
                 d2 = np.sum((sel_xy[i] - sel_xy) ** 2, axis=1)
-                term = np.exp(-d2 / (self.config.div_sigma ** 2 + 1e-12))
+                term = np.exp(-d2 / (self.config.div_sigma**2 + 1e-12))
                 term[i] = 0.0
                 term = np.where(active_bool, term, 0.0)
                 r_div[i] = -float(np.sum(term))
@@ -216,7 +209,6 @@ class TODCRewardFunction:
         for i in range(num_p):
             details[f"p_{i}"]["r_safe"] = float(r_safe[i])
 
-        # 时间惩罚按仿真时间推进量计：step_cost * (sim_time_elapsed / sim_dt)，与 main0319 中 t/t_all 一致
         if sim_dt > 1e-12:
             r_time = float(self.config.step_cost) * (float(sim_time_elapsed) / float(sim_dt))
         else:
@@ -228,7 +220,10 @@ class TODCRewardFunction:
             if not active_bool[i]:
                 continue
             rewards[f"p_{i}"] += float(
-                details[f"p_{i}"]["r_qual"] + details[f"p_{i}"]["r_global"] + details[f"p_{i}"]["r_safe"] + details[f"p_{i}"]["r_time"]
+                details[f"p_{i}"]["r_qual"]
+                + details[f"p_{i}"]["r_global"]
+                + details[f"p_{i}"]["r_safe"]
+                + details[f"p_{i}"]["r_time"]
             )
 
         if return_details:
@@ -243,8 +238,8 @@ class TODCRewardFunction:
         num_e: int,
         asset_breached: bool,
         details: Optional[Dict[str, dict]] = None,
+        debug_print: bool = False,
     ):
-        """在回合结束时写入捕获奖励与资产损失惩罚（通常各 ``p_i`` 相同）。"""
         terminal_bonus = 0.0
         terminal_penalty = 0.0
         if captured_delta > 0:
@@ -263,3 +258,10 @@ class TODCRewardFunction:
         if details is not None:
             details["terminal_bonus"] = terminal_bonus
             details["terminal_penalty"] = terminal_penalty
+
+        if debug_print and (terminal_bonus != 0.0 or terminal_penalty != 0.0):
+            print(
+                f"[REWARD] terminal_bonus={terminal_bonus:.4f} terminal_penalty={terminal_penalty:.4f} "
+                f"(captured_delta={captured_delta}, asset_breached={asset_breached})"
+            )
+

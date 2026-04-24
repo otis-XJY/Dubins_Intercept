@@ -1,6 +1,6 @@
 import numpy as np
 
-from marl.MARL_env import TODCMARLEnv
+from marl.envs import TODCMARLEnv
 
 
 def test_phase2_obs_shapes_and_mask_consistency():

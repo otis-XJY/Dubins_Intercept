@@ -90,7 +90,7 @@ def _index_html(stream_path: str = "/stream.mjpg") -> str:
     }}
     .k {{ color: rgba(230,230,230,0.75); }}
     .v {{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\";
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New";
       white-space: pre-wrap;
       word-break: break-all;
       font-size: 11px;
@@ -257,11 +257,7 @@ class LiveHTTPServer:
                 remote_hint = f"http://{local_ip}:{self.port}/"
             except Exception:
                 remote_hint = f"http://<服务器IP>:{self.port}/"
-            return {
-                "bind_url": bind_url,
-                "open_url": open_url,
-                "remote_hint": remote_hint,
-            }
+            return {"bind_url": bind_url, "open_url": open_url, "remote_hint": remote_hint}
         return {"bind_url": bind_url, "open_url": bind_url, "remote_hint": bind_url}
 
     def stop(self) -> None:
@@ -270,3 +266,4 @@ class LiveHTTPServer:
                 self._httpd.shutdown()
             finally:
                 self._httpd = None
+

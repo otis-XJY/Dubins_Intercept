@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from marl.obs_generator import TODCObservationGenerator, alive_pid_eid_sets
+from marl.obs import TODCObservationGenerator, alive_pid_eid_sets
 
 
 def test_alive_pid_eid_sets():

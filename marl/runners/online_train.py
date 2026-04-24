@@ -9,6 +9,7 @@ import random
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
+from collections import deque
 
 import numpy as np
 import torch
@@ -18,7 +19,7 @@ import imageio
 import tempfile
 
 from marl import TODCMARLEnv, build_actor_critic_schemes
-from marl.mappo import compute_gae, ppo_minibatch_update
+from marl.rl.mappo import compute_gae, ppo_minibatch_update
 
 
 @dataclass
@@ -53,6 +54,15 @@ class TrainConfig:
     wandb_entity: Optional[str] = None
     wandb_run_name: Optional[str] = None
     wandb_mode: str = "online"
+    # 仅打印“强化学习训练进程”相关输出（类似优秀 MARL 项目训练日志），不输出环境/奖励细节
+    rl_print: bool = True
+    # 是否打印环境 reset/step（默认关闭，避免被规划/仿真细节淹没）
+    env_print: bool = False
+    # 是否打印 MAPPO/GAE 的内部摘要（默认关闭；开启后仍受 log_interval 控制）
+    algo_print: bool = False
+    # rollout 内每 N 个「决策步」额外打印一行（0 关闭，避免刷屏可设 5~20）
+    debug_step_interval: int = 0
+    # 每 N 个 episode 打印一次 RL 汇总（1 表示每回合都打印）
     log_interval: int = 1
     eval_interval: int = 10
     eval_episodes: int = 1
@@ -79,7 +89,9 @@ class TrainConfig:
     env: Optional[Dict] = None
 
 
-def _todc_marl_env_dict(cfg: TrainConfig, *, render_mode: str) -> Dict:
+def _todc_marl_env_dict(
+    cfg: TrainConfig, *, render_mode: str, force_debug_print: Optional[bool] = None
+) -> Dict:
     if cfg.env is not None and not isinstance(cfg.env, dict):
         raise TypeError(f"TrainConfig.env must be dict or None, got {type(cfg.env)}")
     out: Dict = {
@@ -91,6 +103,10 @@ def _todc_marl_env_dict(cfg: TrainConfig, *, render_mode: str) -> Dict:
     if cfg.env:
         out.update(cfg.env)
     out["render_mode"] = render_mode
+    if force_debug_print is not None:
+        out["debug_print"] = bool(force_debug_print)
+    elif "debug_print" not in out:
+        out["debug_print"] = bool(getattr(cfg, "env_print", False))
     return out
 
 
@@ -356,7 +372,7 @@ def _run_eval_episode(
     trace_delta_t_all = []
     trace_frames = []
 
-    # 与训练相同：每步 env.step 内部为 main0319 的 update -> step_geometry -> check（见 MARL_env）。
+    # 与训练相同：每步 env.step 内部为 main0319 的 update -> step_geometry -> check（见 marl.envs.todc_env）。
     with torch.no_grad():
         while (not done) and (not trunc):
             obs_t = _build_model_obs(obs_np, device)
@@ -466,7 +482,7 @@ def train_online(cfg: TrainConfig):
     live_server = None
     live_store = None
     if dist_ctx.is_main and bool(cfg.live_server_enable):
-        from marl.live_server import LiveFrameStore, LiveHTTPServer
+        from marl.utils.live_server import LiveFrameStore, LiveHTTPServer
 
         live_store = LiveFrameStore()
         live_server = LiveHTTPServer(host=cfg.live_server_host, port=int(cfg.live_server_port), store=live_store)
@@ -506,12 +522,23 @@ def train_online(cfg: TrainConfig):
         os.makedirs(cfg.replay_dir, exist_ok=True)
 
     global_step = 0
+    wall_start = time.perf_counter()
+    ep_return_ma = {name: deque(maxlen=20) for name in models.keys()}
+    ep_steps_ma = {name: deque(maxlen=20) for name in models.keys()}
+
+    if dist_ctx.is_main and cfg.rl_print:
+        print(
+            f"[RL] start | schemes={list(models.keys())} | episodes={cfg.episodes} | device={device} | "
+            f"DDP={dist_ctx.enabled} | log_interval={cfg.log_interval} | debug_step_interval={cfg.debug_step_interval}"
+        )
+
     for ep in range(1, cfg.episodes + 1):
         for scheme_name, model in models.items():
             model.train()
             env = envs[scheme_name]
             opt = opts[scheme_name]
 
+            ep_t0 = time.perf_counter()
             obs_np, _ = env.reset(seed=cfg.seed + ep + dist_ctx.rank * 100000)
             done = False
             trunc = False
@@ -626,6 +653,23 @@ def train_online(cfg: TrainConfig):
                 ep_steps += 1
                 global_step += 1
 
+                dbg_every = int(getattr(cfg, "debug_step_interval", 0) or 0)
+                if (
+                    dist_ctx.is_main
+                    and cfg.rl_print
+                    and dbg_every > 0
+                    and ep_steps > 0
+                    and (ep_steps % dbg_every == 0)
+                ):
+                    repl_m = float(
+                        np.mean([float(infos[f"p_{i}"]["replanned"]) for i in range(env.num_P)])
+                    )
+                    print(
+                        f"[RL] ep={ep}/{cfg.episodes} scheme={scheme_name} step={ep_steps} "
+                        f"r={float(np.mean(reward_vec)):.4f} t_all={infos['global_t_all']:.2f} "
+                        f"replan={int(repl_m)} K={int(infos['p_0']['num_candidates'])}"
+                    )
+
                 obs_np = next_obs_np
                 done = bool(terms["__all__"])
                 trunc = bool(truncs["__all__"])
@@ -679,6 +723,8 @@ def train_online(cfg: TrainConfig):
 
             env.set_on_tick(None)
 
+            ep_log = dist_ctx.is_main and cfg.rl_print and (ep % max(1, cfg.log_interval) == 0)
+
             if len(ro_obs) > 0:
                 rewards_np = np.stack(ro_rew, axis=0)
                 values_np = np.stack(ro_val, axis=0)
@@ -700,6 +746,13 @@ def train_online(cfg: TrainConfig):
                 )
                 adv_np = (adv_np - adv_np.mean()) / (adv_np.std() + 1e-8)
 
+                if ep_log and cfg.algo_print:
+                    print(
+                        f"[GAE] ep={ep} scheme={scheme_name} T={len(ro_obs)} "
+                        f"adv_mean={float(adv_np.mean()):.4f} adv_std={float(adv_np.std()):.4f} "
+                        f"ret_mean={float(ret_np.mean()):.4f}"
+                    )
+
                 ep_policy_loss, ep_value_loss, ep_entropy = ppo_minibatch_update(
                     model,
                     opt,
@@ -716,6 +769,7 @@ def train_online(cfg: TrainConfig):
                     entropy_coef=cfg.entropy_coef,
                     max_grad_norm=1.0,
                     minibatch_size=max(1, min(cfg.ppo_minibatch_size, len(ro_obs))),
+                    verbose=bool(ep_log and cfg.algo_print),
                 )
 
             if record_train_video:
@@ -742,6 +796,9 @@ def train_online(cfg: TrainConfig):
             }
             history[scheme_name].append(ep_stats)
 
+            ep_return_ma[scheme_name].append(ep_return)
+            ep_steps_ma[scheme_name].append(ep_steps)
+
             if run is not None:
                 run.log(
                     {
@@ -757,7 +814,9 @@ def train_online(cfg: TrainConfig):
                 )
 
             if dist_ctx.is_main and cfg.eval_interval > 0 and (ep % cfg.eval_interval) == 0:
-                eval_env = TODCMARLEnv(_todc_marl_env_dict(cfg, render_mode="rgb_array"))
+                eval_env = TODCMARLEnv(
+                    _todc_marl_env_dict(cfg, render_mode="rgb_array", force_debug_print=False)
+                )
 
                 eval_returns = []
                 eval_steps = []
@@ -804,11 +863,25 @@ def train_online(cfg: TrainConfig):
                         }
                     )
 
-            if dist_ctx.is_main and (ep % cfg.log_interval) == 0:
+                if dist_ctx.is_main and cfg.rl_print:
+                    print(
+                        f"[EVAL] ep={ep} [{scheme_name}] mean_return={mean_eval_return:.4f} "
+                        f"mean_steps={mean_eval_steps:.1f} n_episodes={len(eval_returns)}"
+                    )
+
+            # RL-only training progress (similar to common MARL repos)
+            if ep_log:
+                ep_dt = max(1e-9, time.perf_counter() - ep_t0)
+                fps = float(ep_steps) / ep_dt
+                ret_ma = float(np.mean(ep_return_ma[scheme_name])) if len(ep_return_ma[scheme_name]) > 0 else ep_return
+                step_ma = float(np.mean(ep_steps_ma[scheme_name])) if len(ep_steps_ma[scheme_name]) > 0 else float(ep_steps)
+                wall = time.perf_counter() - wall_start
                 print(
-                    f"[Episode {ep:04d}] [{scheme_name}] return={ep_stats['return']:.3f} "
-                    f"steps={ep_stats['steps']} policy={ep_stats['policy_loss']:.4f} "
-                    f"value={ep_stats['value_loss']:.4f} entropy={ep_stats['entropy']:.4f}"
+                    f"[RL] ep={ep:04d}/{cfg.episodes} scheme={scheme_name} "
+                    f"R={ep_return:8.3f} (ma{len(ep_return_ma[scheme_name])}={ret_ma:7.3f}) "
+                    f"steps={ep_steps:4d} (ma={step_ma:5.1f}) "
+                    f"pi={ep_stats['policy_loss']:+.4f} v={ep_stats['value_loss']:+.4f} ent={ep_stats['entropy']:+.4f} "
+                    f"fps={fps:6.1f} t_all={ep_stats['final_global_t_all']:7.2f} wall={wall/60.0:6.1f}m"
                 )
 
     if dist_ctx.is_main:
@@ -864,6 +937,30 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--wandb-run-name", type=str, default=None)
     parser.add_argument("--wandb-mode", type=str, default="online", choices=["online", "offline", "disabled"])
+    parser.add_argument(
+        "--rl-print",
+        type=_str2bool,
+        default=True,
+        help="仅输出强化学习训练进程（episode/return/loss/fps 等）。false 时几乎静默，仅保留保存等关键信息。",
+    )
+    parser.add_argument(
+        "--env-print",
+        type=_str2bool,
+        default=False,
+        help="输出环境 reset/step 细节（通常会刷屏，默认关闭）。",
+    )
+    parser.add_argument(
+        "--algo-print",
+        type=_str2bool,
+        default=False,
+        help="输出 GAE/MAPPO 内部摘要（默认关闭）。",
+    )
+    parser.add_argument(
+        "--debug-step-interval",
+        type=int,
+        default=0,
+        help="rollout 内每 N 个决策步额外打印一行进度（0 关闭；例如 5）",
+    )
     parser.add_argument("--log-interval", type=int, default=1)
     parser.add_argument("--eval-interval", type=int, default=10)
     parser.add_argument("--eval-episodes", type=int, default=1)
@@ -959,6 +1056,10 @@ def _parse_args() -> TrainConfig:
         wandb_entity=args.wandb_entity,
         wandb_run_name=args.wandb_run_name,
         wandb_mode=args.wandb_mode,
+        rl_print=bool(args.rl_print),
+        env_print=bool(args.env_print),
+        algo_print=bool(args.algo_print),
+        debug_step_interval=int(args.debug_step_interval),
         log_interval=args.log_interval,
         eval_interval=args.eval_interval,
         eval_episodes=args.eval_episodes,

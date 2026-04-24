@@ -1,14 +1,14 @@
 # =============================================================================
-# Dubins 拦截 · 在线 MARL 训练配置（对应 marl/train_online0325.py 的 TrainConfig）
+# Dubins 拦截 · 在线 MARL 训练配置（对应 marl/runners/online_train.py 中 TrainConfig；入口 python -m marl.runners.online_train）
 # =============================================================================
 #
 # 【如何启动训练】
 #   1) 进入项目根目录，激活环境（示例）：
 #        conda activate dubins
 #   2) 使用本文件（脚本默认即此路径，也可显式指定）：
-#        python -m marl.train_online0325 --config configs/train_online0324.yaml
+#        python -m marl.runners.online_train --config configs/train_online0324.yaml
 #   3) 命令行可覆盖 YAML 中任意同名项（优先级高于配置文件），例如：
-#        python -m marl.train_online0325 --config configs/train_online0324.yaml --episodes 50 --device cpu
+#        python -m marl.runners.online_train --config configs/train_online0324.yaml --episodes 50 --device cpu
 #   4) 仅部分覆盖奖励时，可用 --reward-json '{"step_cost":-0.1}'（会整段替换 reward 字典，慎用）
 #
 # 【仅 YAML 中出现的键会生效】
@@ -26,10 +26,14 @@
 #   - 训练视频 / 步进截图需要：pip install imageio imageio-ffmpeg（后者自带 ffmpeg，便于服务器）
 #
 # 【多方案 schemes】
-#   下列名称与 marl/models.py 中 SCHEME_KEY_TO_NAME 一致；也可写别名 A / B / C 等（见 resolve_design_mode）。
+#   下列名称与 marl/nn/models.py 所依赖的 SCHEME_KEY_TO_NAME 一致；也可写别名 A / B / C 等（见 resolve_design_mode）。
 #
 # =============================================================================
-
+# 仅输出“强化学习训练进程”相关日志（episode/return/loss/fps）；环境/奖励/算法内部默认不打印
+rl_print: true
+env_print: false
+algo_print: false
+debug_step_interval: 5
 # --- 训练规模与随机性 ---
 # 总训练回合数（每个 scheme 各跑这么多 episode）
 episodes: 300
@@ -47,7 +51,7 @@ ppo_epochs: 4
 gae_lambda: 0.95
 ppo_minibatch_size: 32
 
-# --- 网络结构（marl/models.py TODCHeteroActorCritic）---
+# --- 网络结构（marl/nn/models.py TODCHeteroActorCritic）---
 hidden_dim: 128
 num_heads: 4
 

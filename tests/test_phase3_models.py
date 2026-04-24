@@ -2,7 +2,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from marl.models import (
+from marl.nn.models import (
     SCHEME_KEY_TO_NAME,
     UAVInterceptionNetwork,
     build_actor_critic_schemes,

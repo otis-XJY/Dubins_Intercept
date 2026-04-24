@@ -1,6 +1,6 @@
 """MAPPO 训练辅助：广义优势估计 GAE(λ) 与按时间片小批次的 PPO clip 更新。
 
-与 ``marl/train_online0325`` 中按回合收集的 rollout 配合；优势在训练端可做标准化。
+与 ``marl.runners.online_train`` 中按回合收集的 rollout 配合；优势在训练端可做标准化。
 """
 
 from typing import Callable, Dict, List, Tuple
@@ -56,6 +56,7 @@ def ppo_minibatch_update(
     entropy_coef: float,
     max_grad_norm: float,
     minibatch_size: int,
+    verbose: bool = False,
 ) -> Tuple[float, float, float]:
     """对一条轨迹做多轮 epoch；每步用 ``actor_forward``/``critic_forward``（支持 DDP 包装）。"""
     unwrap = model.module if hasattr(model, "module") else model
@@ -119,4 +120,13 @@ def ppo_minibatch_update(
 
     if n_mb == 0:
         return 0.0, 0.0, 0.0
-    return tot_pi / n_mb, tot_v / n_mb, tot_ent / n_mb
+    pi_avg = tot_pi / n_mb
+    v_avg = tot_v / n_mb
+    ent_avg = tot_ent / n_mb
+    if verbose:
+        print(
+            f"[MAPPO] rollout_T={t_max} PPO_epochs={ppo_epochs} minibatches={n_mb} "
+            f"policy_loss={pi_avg:.5f} value_loss={v_avg:.5f} entropy={ent_avg:.5f}"
+        )
+    return pi_avg, v_avg, ent_avg
+

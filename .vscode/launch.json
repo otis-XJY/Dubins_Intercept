@@ -8,11 +8,11 @@
 
 
         {
-            "name": "Python: debug marl.train_online0325",
+            "name": "Python: debug marl.runners.online_train",
             "type": "debugpy",
             "request": "launch",
             "python": "/home/xujunyi/anaconda3/envs/dubins/bin/python",
-            "module": "marl.train_online0325",
+            "module": "marl.runners.online_train",
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "args": ["--config", "configs/train_online0324.yaml"]

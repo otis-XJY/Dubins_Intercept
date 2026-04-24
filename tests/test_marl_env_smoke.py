@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from marl.MARL_env import TODCMARLEnv
+from marl.envs import TODCMARLEnv
 
 
 def _first_valid_actions(obs: dict, num_p: int) -> np.ndarray:

@@ -3,7 +3,7 @@
 
 真实几何捕获：可选超大 cap_dist/cap_angle 使 _update_capflag_from_geometry 一次性全捕获。
 
-已修复（见 ``MARL_env._update_capflag_from_geometry``）：在 ``PosE`` 行数与上一时刻 ``Capflag`` 长度不一致时，
+已修复（见 ``TODCMARLEnv._update_capflag_from_geometry`` / ``marl.envs.todc_env``）：在 ``PosE`` 行数与上一时刻 ``Capflag`` 长度不一致时，
 上一捕获向量与新的 ``new_cap`` 对齐（否则 ``~prev_cap & Capflag`` 会广播报错）。该情形出现在
 ``_phase_update`` 已收缩 ``pairs``、``_advance_from_paths`` 已用紧凑 ``UnCapEidNew`` 采样 ``PosE``，
 但 ``Capflag`` 尚未重写为同长度之前。
@@ -12,7 +12,7 @@
 import numpy as np
 import pytest
 
-from marl.MARL_env import TODCMARLEnv
+from marl.envs import TODCMARLEnv
 
 
 @pytest.fixture

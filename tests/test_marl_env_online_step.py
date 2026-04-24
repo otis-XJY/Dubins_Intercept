@@ -1,6 +1,6 @@
 import numpy as np
 
-from marl.MARL_env import TODCMARLEnv
+from marl.envs import TODCMARLEnv
 
 
 def test_marl_env_online_step_info_fields():

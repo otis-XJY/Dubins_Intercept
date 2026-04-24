@@ -3,7 +3,12 @@ from pathlib import Path
 
 torch = pytest.importorskip("torch")
 
-from marl.train_online0325 import TrainConfig, _load_config_file, _parse_gpu_ids, train_online
+from marl.runners.online_train import (
+    TrainConfig,
+    _load_config_file,
+    _parse_gpu_ids,
+    train_online,
+)
 
 
 def test_train_online_single_scheme_smoke():

@@ -5,8 +5,8 @@ from typing import Dict, List, Optional, Sequence, Union
 import torch
 import torch.nn as nn
 
-from marl.model_blocks.network import UAVInterceptionNetwork
-from marl.model_blocks.schemes import SCHEME_KEY_TO_NAME, design_mode_to_name, resolve_design_mode
+from marl.nn.blocks.network import UAVInterceptionNetwork
+from marl.nn.blocks.schemes import SCHEME_KEY_TO_NAME, design_mode_to_name, resolve_design_mode
 
 
 def build_actor_critic_schemes(
@@ -71,3 +71,4 @@ class TODCHeteroActorCritic(nn.Module):
 
     def critic_forward(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model.critic_forward(obs)
+

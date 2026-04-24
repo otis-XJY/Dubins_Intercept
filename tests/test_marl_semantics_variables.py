@@ -39,7 +39,7 @@ MARL 变量语义探测（Capflag / UnCapPid / UnCapPidNew / pairs_realE2P / cap
 import numpy as np
 import pytest
 
-from marl.MARL_env import TODCMARLEnv
+from marl.envs import TODCMARLEnv
 
 
 @pytest.fixture
