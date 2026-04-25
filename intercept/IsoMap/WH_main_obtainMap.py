@@ -13,6 +13,41 @@ class IsoMapData:
     pathid: np.ndarray      # 路径ID
     IsoVtheta: np.ndarray   # 等值线速度角度
 
+
+def WH_update_time_fields_from_diag(Map: dict) -> dict:
+    """仅更新 Map 中与时间采样相关的字段。
+
+    说明：
+    - 原始实现位于 WH_main_obtainMapP 内部（依赖 Maxlength）。
+    - 这里将 Maxlength 用地图对角线长度替代，避免必须生成 IsoMapP_i_tt/pathFinalP 才能得到 timeIsoRes。
+    - 该函数会更新：Map['numTime'], Map['timePlot'], Map['time'], Map['timeIsoRes']。
+    """
+    stepsize = float(Map["Stepsize"])
+    v_p = float(Map["v_P"])
+    mapsize_x = float(Map["mapsize_x"])
+    mapsize_y = float(Map["mapsize_y"])
+
+    diag = float(np.hypot(mapsize_x, mapsize_y))
+    num_time_base = int(Map.get("numTime", 0))
+    # 保持原规则：numTime = max(Maxlength*Stepsize//250, Map['numTime'])
+    # 这里只是把 Maxlength 替换为 diag（单位保持与旧逻辑一致）
+    num_time = max(int(diag * stepsize // 250) if diag > 0 else num_time_base, num_time_base)
+    Map["numTime"] = num_time
+
+    if diag > 0 and v_p > 1e-12:
+        time_plot = np.linspace(1, diag / v_p, num_time)
+    else:
+        time_plot = np.linspace(1, 1, num_time) if num_time > 0 else np.asarray([], dtype=float)
+    time_arr = time_plot * stepsize
+    Map["timePlot"] = time_plot
+    Map["time"] = time_arr
+
+    time_iso_res_ = np.diff(time_arr)
+    time_iso_res = float(time_iso_res_[0]) if time_iso_res_.size > 0 else 0.0
+    Map["timeIsoRes"] = time_iso_res
+    return Map
+
+
 def WH_main_obtainMapP(Map, draw=True, draw_interactive=False):
     """主流程：计算所有 UAV->Target 的路径并生成 IsoMap 数据。
     draw: 是否调用外部 DrawIso 程序进行绘图（默认 True）
@@ -62,18 +97,17 @@ def WH_main_obtainMapP(Map, draw=True, draw_interactive=False):
 
             vthetaAll_ = []
 
-    # 生成每个无人机在不同时间点的轨迹
+    # 生成每个无人机在不同时间点的轨迹（时间字段更新仍保留在 Map 内）
     Maxlength = max(lengthPathP) if len(lengthPathP) > 0 else 0
-    numTime =max(Maxlength* Stepsize//250 if Maxlength > 0 else Map['numTime'], Map['numTime'])
-    Map['numTime']=numTime
+    numTime = max(Maxlength * Stepsize // 250 if Maxlength > 0 else Map["numTime"], Map["numTime"])
+    Map["numTime"] = numTime
     IsoMapP_i_tt = [[{} for _ in range(numTime)] for _ in range(len(PStart_Point[:, 1]))]
-    v_P = Map['v_P']
-
+    v_P = Map["v_P"]
 
     timePlot = np.linspace(1, Maxlength / v_P, numTime) if Maxlength > 0 else np.linspace(1, 1, numTime)
     time = timePlot * Stepsize
-    Map['timePlot'] = timePlot
-    Map['time'] = time
+    Map["timePlot"] = timePlot
+    Map["time"] = time
 
     timeIsoRes_ = np.diff(time)  # numpy 里 diff 是一维差分
     timeIsoRes = timeIsoRes_[0] if len(timeIsoRes_) > 0 else 0  # 第一个元素

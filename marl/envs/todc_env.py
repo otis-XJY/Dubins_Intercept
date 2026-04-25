@@ -61,6 +61,9 @@ class TODCMARLEnv(gym.Env):
         self.data_dir = self.config.get("data_dir", project_root)
         self.map_root = self.config.get("map_root", os.path.join(self.data_dir, "map"))
         self.time_map = self.config.get("time_map", None)
+        # TimeMap selection at reset(): fixed/random/cycle. If fixed, uses `time_map` (or auto-resolve).
+        self.time_map_mode = self.config.get("time_map_mode", "fixed")
+        self.time_map_id = self.config.get("time_map_id", None)
         self.evader_profile_mode = self.config.get("evader_profile_mode", "random")
         self.evader_profile_id = self.config.get("evader_profile_id", None)
         self.time_res = float(self.config.get("time_res", 1.0))
@@ -100,6 +103,7 @@ class TODCMARLEnv(gym.Env):
         self.assigned_eid_full: Optional[np.ndarray] = None  # (num_P,) global eid target per pursuer, -1 if none
         self.last_min_dist_stable: Optional[np.ndarray] = None  # (num_P,) cached stable distances
         self._profile_cursor = -1
+        self._time_map_cursor = -1
         self.current_profile = None
         self.decision_step = 0
         # Cached geometry from last _compute_isomap_intercept_candidates (for path stitching)
@@ -187,17 +191,83 @@ class TODCMARLEnv(gym.Env):
     def _folder_has_files(self, base: str, filenames: List[str]) -> bool:
         return all(os.path.exists(os.path.join(base, f)) for f in filenames)
 
+    def _required_static_map_files(self) -> List[str]:
+        return [
+            "Map.jbl",
+            "IsoMapPTP2Iso_i_tt.jbl",
+            "IsoMapPIso2TP_i_tt.jbl",
+            "pathFinalMapPTP2Iso.jbl",
+            "IsoMapTP2Val_i_tt.jbl",
+            "pathFinalTP2Val.jbl",
+            "IsoMapETP2Iso_i_tt.jbl",
+            "IsoMapEIso2TP_i_tt.jbl",
+            "pathFinalMapETP2Iso.jbl",
+        ]
+
+    def _discover_time_maps_with_assets(self) -> List[str]:
+        required = self._required_static_map_files()
+        out = []
+        for folder in self._time_folders():
+            base = os.path.join(self.map_root, folder)
+            if self._folder_has_files(base, required):
+                out.append(folder)
+        return out
+
+    def _select_time_map(self, options: Optional[Dict] = None) -> str:
+        """选择一个 TimeMap 文件夹名（仅名字，不含 map_root 前缀）。"""
+        options = options or {}
+        if "time_map" in options and str(options["time_map"]).strip():
+            return self._normalize_time_folder(options["time_map"]) or str(options["time_map"]).strip()
+
+        # 若用户强制指定 time_map_id，则按排序后的可用 TimeMap 列表取模选择
+        tm_list = self._discover_time_maps_with_assets()
+        if len(tm_list) == 0:
+            raise FileNotFoundError(
+                f"map_root={self.map_root} 下未发现任何可用 TimeMap（缺少静态资产文件）。"
+            )
+
+        if self.time_map_id is not None:
+            idx = int(self.time_map_id) % len(tm_list)
+            return tm_list[idx]
+        if "time_map_id" in options:
+            idx = int(options["time_map_id"]) % len(tm_list)
+            return tm_list[idx]
+
+        mode = str(self.time_map_mode).lower().strip()
+        if mode == "fixed":
+            explicit = self._normalize_time_folder(self.time_map)
+            if explicit is None:
+                # 兼容旧行为：若未指定，则用最新的（_time_folders 逆序）
+                return tm_list[0]
+            if explicit not in tm_list:
+                raise FileNotFoundError(
+                    f"time_map={explicit} 不可用（未找到完整静态资产）。可用列表: {tm_list[:10]}"
+                )
+            return explicit
+        if mode == "cycle":
+            self._time_map_cursor = (self._time_map_cursor + 1) % len(tm_list)
+            return tm_list[self._time_map_cursor]
+        if mode == "random":
+            idx = int(self.np_random.integers(0, len(tm_list)))
+            return tm_list[idx]
+        raise ValueError(f"Unknown time_map_mode: {self.time_map_mode} (expected fixed/random/cycle)")
+
     def _discover_evader_profile_dirs(self, map_base: str) -> List[str]:
         required = ["pathFinalE2ValIn.jbl", "PathE2Val_true.jbl"]
         slots = []
         for name in sorted(os.listdir(map_base)):
             slot_dir = os.path.join(map_base, name)
-            if os.path.isdir(slot_dir) and self._folder_has_files(slot_dir, required):
+            if not os.path.isdir(slot_dir):
+                continue
+            if name.startswith(".") or name == "__pycache__":
+                continue
+            if self._folder_has_files(slot_dir, required):
                 slots.append(slot_dir)
-
-        # 兼容旧目录结构：若不存在子目录，则允许直接使用 map/TimeMap 下的单组轨迹
-        if not slots and self._folder_has_files(map_base, required):
-            slots = [map_base]
+        if len(slots) == 0:
+            raise FileNotFoundError(
+                f"No evader profile found under {map_base}. Expected subfolders map/<TimeMap>/<TimeEpath>/ "
+                f"with required files {required}."
+            )
         return slots
 
     def _load_evader_profile(self, profile_dir: str):
@@ -232,7 +302,8 @@ class TODCMARLEnv(gym.Env):
         idx = int(self.np_random.integers(0, len(self.evader_profile_dirs)))
         return self.evader_profile_dirs[idx]
 
-    def _load_assets(self):
+    def _load_assets_for_time_map(self, selected_map_folder: str) -> None:
+        """加载某个 TimeMap 的静态资产，并刷新与 Map 相关的字段。"""
         map_names = {
             "Map": "Map.jbl",
             "IsoMapPTP2Iso_i_tt": "IsoMapPTP2Iso_i_tt.jbl",
@@ -245,34 +316,14 @@ class TODCMARLEnv(gym.Env):
             "pathFinalMapETP2Iso": "pathFinalMapETP2Iso.jbl",
         }
         required_map_files = list(map_names.values())
-
-        folders = self._time_folders()
-        explicit_map = self._normalize_time_folder(self.time_map)
-        map_candidates = [explicit_map] if explicit_map is not None else folders
-        map_candidates = [f for f in map_candidates if f is not None]
-
-        selected_map_folder = None
-        for folder in map_candidates:
-            folder_base = os.path.join(self.map_root, folder)
-            if self._folder_has_files(folder_base, required_map_files):
-                selected_map_folder = folder
-                break
-
-        if selected_map_folder is None:
-            raise FileNotFoundError(
-                f"Cannot resolve static map assets in {self.map_root}. "
-                f"Required files: {required_map_files}"
-            )
-
         map_base = os.path.join(self.map_root, selected_map_folder)
+        if not self._folder_has_files(map_base, required_map_files):
+            raise FileNotFoundError(
+                f"TimeMap={selected_map_folder} 静态资产不完整（目录 {map_base}）。Required: {required_map_files}"
+            )
         resolved = {k: os.path.join(map_base, v) for k, v in map_names.items()}
         self.time_map = selected_map_folder
         self.evader_profile_dirs = self._discover_evader_profile_dirs(map_base)
-
-        if len(self.evader_profile_dirs) == 0:
-            raise FileNotFoundError(
-                f"No evader profile found under {map_base}. Expected map/<TimeMap>/<slot>/PathE2Val_true.jbl"
-            )
 
         self.Map = joblib.load(resolved["Map"])
         self.IsoMapPTP2Iso_i_tt = joblib.load(resolved["IsoMapPTP2Iso_i_tt"])
@@ -314,6 +365,7 @@ class TODCMARLEnv(gym.Env):
         self.num_P = int(self.PStart_Point.shape[0])
         self.num_P_ = self.num_P
         self.agents = [f"p_{i}" for i in range(self.num_P)]
+        self.num_V = int(self.ValuePos.shape[0]) if hasattr(self, "ValuePos") else 0
 
         self.E_PreRef = {
             "num_v": 10,
@@ -340,6 +392,11 @@ class TODCMARLEnv(gym.Env):
         ]
         self.CapRef["obs_polygons"] = self.obs_polygons
 
+    def _load_assets(self):
+        # 初始化时按 time_map_mode/time_map/time_map_id 解析一次
+        selected = self._select_time_map(options={})
+        self._load_assets_for_time_map(selected)
+
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict] = None):
         super().reset(seed=seed)
         options = options or {}
@@ -348,6 +405,11 @@ class TODCMARLEnv(gym.Env):
         if isinstance(reward_opts, dict) and len(reward_opts) > 0:
             self.set_reward_params(**reward_opts)
 
+        # reset 时可切换 TimeMap：先选地图并加载静态资产，再选 profile(TimeEpath)。
+        selected_tm = self._select_time_map(options)
+        if selected_tm != self.time_map:
+            self._load_assets_for_time_map(selected_tm)
+            self._build_spaces()
         profile_dir = self._select_profile_dir(options)
         self._load_evader_profile(profile_dir)
         self.current_profile = os.path.relpath(profile_dir, self.map_root)

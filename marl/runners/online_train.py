@@ -72,13 +72,21 @@ class TrainConfig:
     replay_dir: str = "output/eval_traces"
     # Visualization settings
     step_frame_interval: int = 50
+    # 独立开关：控制是否上传 step/tick 图片（即使 wandb_mode=online/offline）。
+    wandb_log_step_images: bool = True
     # step 内 tick 级别图片采样频率（0 关闭）。tick 指 env.step() 内部 while 的物理推进次数。
     # 注意：该日志非常密集，建议 >= 50；否则 wandb 存储与网络流量会爆炸。
     wandb_tick_image_every: int = 0
+    wandb_log_tick_images: bool = True
     eval_video_fps: int = 10
     # 每 N 个训练 episode 将整段 rollout 帧序列编码为 mp4 上传 wandb（0 关闭）
     wandb_train_video_every: int = 0
     train_wandb_video_fps: int = 10
+    # 代码生成图表（wandb.plot.*）：每 N 个 episode 记录一次（0 关闭）。
+    # 这些图表会作为已渲染的可视化对象出现在 W&B run 页面，无需手动配置 Dashboard。
+    wandb_custom_chart_every: int = 0
+    # 自定义图表窗口（用于限制 Table 长度，避免太大）；<=0 表示用全量历史。
+    wandb_custom_chart_window: int = 200
     # Live web streaming (mjpeg + status json). Designed for SSH port-forward.
     live_server_enable: bool = False
     live_server_host: str = "127.0.0.1"
@@ -349,7 +357,7 @@ def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = Tru
     )
 
     # Define commonly used metrics so W&B UI can align step/episode axes and present them nicely.
-    # Step-level metrics should use `global_step` as the x-axis; episode-level use `episode`.
+    # Step-level metrics should use per-scheme decision-step as x-axis; episode-level use `episode`.
     step_metrics = [
         "step_reward",
         "r_qual",
@@ -361,6 +369,12 @@ def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = Tru
         "policy_loss",
         "value_loss",
         "entropy",
+        "approx_kl",
+        "clipfrac",
+        "explained_variance",
+        "grad_norm",
+        "SPS",
+        "learning_rate",
         "delta_t_all",
         "global_t_all",
         "path_exec_t",
@@ -380,9 +394,11 @@ def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = Tru
     # Define metrics for each scheme (namespacing by scheme_name when logging)
     for scheme in schemes:
         prefix = f"{scheme}/"
+        scheme_step_name = prefix + "scheme_step"
+        wandb.define_metric(scheme_step_name)
         for m in step_metrics:
             name = prefix + m
-            wandb.define_metric(name, step_metric="global_step")
+            wandb.define_metric(name, step_metric=scheme_step_name)
         for m in episode_metrics:
             name = prefix + m
             wandb.define_metric(name, step_metric="episode")
@@ -544,10 +560,12 @@ def train_online(cfg: TrainConfig):
     opts: Dict[str, torch.optim.Optimizer] = {}
 
     tick_every_cfg = int(getattr(cfg, "wandb_tick_image_every", 0) or 0)
+    log_step_images = bool(getattr(cfg, "wandb_log_step_images", True))
+    log_tick_images = bool(getattr(cfg, "wandb_log_tick_images", True))
     need_train_rgb = (
-        (cfg.step_frame_interval > 0)
+        (cfg.step_frame_interval > 0 and log_step_images)
         or (cfg.wandb_train_video_every > 0 and cfg.wandb_mode != "disabled")
-        or (tick_every_cfg > 0 and cfg.wandb_mode != "disabled")
+        or (tick_every_cfg > 0 and log_tick_images and cfg.wandb_mode != "disabled")
         or bool(cfg.live_server_enable)
     )
     for scheme_name, model in models.items():
@@ -557,6 +575,7 @@ def train_online(cfg: TrainConfig):
         opts[scheme_name] = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
     history = {name: [] for name in models.keys()}
+    chart_series = {name: [] for name in models.keys()}  # points for wandb.Table / wandb.plot.*
     best_eval_return = {name: -np.inf for name in models.keys()}
 
     os.makedirs(cfg.save_dir, exist_ok=True)
@@ -564,6 +583,7 @@ def train_online(cfg: TrainConfig):
         os.makedirs(cfg.replay_dir, exist_ok=True)
 
     global_step = 0
+    scheme_step: Dict[str, int] = {name: 0 for name in models.keys()}
     wall_start = time.perf_counter()
     ep_return_ma = {name: deque(maxlen=20) for name in models.keys()}
     ep_steps_ma = {name: deque(maxlen=20) for name in models.keys()}
@@ -579,6 +599,7 @@ def train_online(cfg: TrainConfig):
             model.train()
             env = envs[scheme_name]
             opt = opts[scheme_name]
+            scheme_step[scheme_name] = 0
 
             ep_t0 = time.perf_counter()
             obs_np, _ = env.reset(seed=cfg.seed + ep + dist_ctx.rank * 100000)
@@ -589,6 +610,13 @@ def train_online(cfg: TrainConfig):
             ep_value_loss = 0.0
             ep_entropy = 0.0
             ep_steps = 0
+            # reward decomposition accumulators (episode mean)
+            ep_r_qual = 0.0
+            ep_r_global = 0.0
+            ep_r_safe = 0.0
+            ep_r_time = 0.0
+            ep_terminal_bonus = 0.0
+            ep_terminal_penalty = 0.0
 
             record_train_video = (
                 run is not None
@@ -603,7 +631,9 @@ def train_online(cfg: TrainConfig):
 
             # tick-level callback: used for wandb tick_image and live mjpeg stream.
             tick_every = int(getattr(cfg, "wandb_tick_image_every", 0) or 0)
-            enable_tick_cb = dist_ctx.is_main and ((run is not None and tick_every > 0) or (live_server is not None))
+            enable_tick_cb = dist_ctx.is_main and (
+                ((run is not None and log_tick_images and tick_every > 0) or (live_server is not None))
+            )
             last_live_push_t = 0.0
 
             def _on_tick_cb(tick_env: TODCMARLEnv, tick_idx: int):
@@ -636,7 +666,7 @@ def train_online(cfg: TrainConfig):
                     else:
                         live_store.update(status=st)
 
-                if run is not None and tick_every > 0 and (tick_idx % tick_every == 0):
+                if run is not None and log_tick_images and tick_every > 0 and (tick_idx % tick_every == 0):
                     import wandb as _wandb
 
                     frame = tick_env.render()
@@ -651,6 +681,7 @@ def train_online(cfg: TrainConfig):
                             f"{scheme_name}/tick_image": _wandb.Image(frame, caption=caption),
                             "global_step": global_step,
                             "episode": ep,
+                            f"{scheme_name}/scheme_step": scheme_step[scheme_name],
                         }
                     )
 
@@ -694,6 +725,7 @@ def train_online(cfg: TrainConfig):
                 ep_return += float(np.mean(reward_vec))
                 ep_steps += 1
                 global_step += 1
+                scheme_step[scheme_name] += 1
 
                 dbg_every = int(getattr(cfg, "debug_step_interval", 0) or 0)
                 if (
@@ -727,6 +759,13 @@ def train_online(cfg: TrainConfig):
                     r_time = np.mean([reward_details[f"p_{i}"]["r_time"] for i in range(env.num_P)])
                     terminal_bonus = reward_details["terminal_bonus"]
                     terminal_penalty = reward_details["terminal_penalty"]
+                    # accumulate episode means (independent of logging frequency)
+                    ep_r_qual += float(r_qual)
+                    ep_r_global += float(r_global)
+                    ep_r_safe += float(r_safe)
+                    ep_r_time += float(r_time)
+                    ep_terminal_bonus += float(terminal_bonus)
+                    ep_terminal_penalty += float(terminal_penalty)
                     run.log(
                         {
                             f"{scheme_name}/step_reward": float(np.mean(reward_vec)),
@@ -744,12 +783,18 @@ def train_online(cfg: TrainConfig):
                                 np.mean([infos[f"p_{i}"]["decision_step"] for i in range(env.num_P)])
                             ),
                             "global_step": global_step,
+                            f"{scheme_name}/scheme_step": scheme_step[scheme_name],
                         }
                     )
 
-                if run is not None and cfg.step_frame_interval and cfg.step_frame_interval > 0 and (
-                    global_step % cfg.step_frame_interval == 0
+                if (
+                    run is not None
+                    and log_step_images
+                    and cfg.step_frame_interval
+                    and cfg.step_frame_interval > 0
+                    and (global_step % cfg.step_frame_interval == 0)
                 ):
+                    global_step % cfg.step_frame_interval == 0
                     import wandb as _wandb
 
                     frame = env.render()
@@ -757,6 +802,7 @@ def train_online(cfg: TrainConfig):
                         {
                             f"{scheme_name}/step_image": _wandb.Image(frame, caption=f"step {global_step}"),
                             "global_step": global_step,
+                            f"{scheme_name}/scheme_step": scheme_step[scheme_name],
                         }
                     )
 
@@ -795,7 +841,15 @@ def train_online(cfg: TrainConfig):
                         f"ret_mean={float(ret_np.mean()):.4f}"
                     )
 
-                ep_policy_loss, ep_value_loss, ep_entropy = ppo_minibatch_update(
+                (
+                    ep_policy_loss,
+                    ep_value_loss,
+                    ep_entropy,
+                    ep_approx_kl,
+                    ep_clipfrac,
+                    ep_explained_variance,
+                    ep_grad_norm,
+                ) = ppo_minibatch_update(
                     model,
                     opt,
                     ro_obs,
@@ -833,10 +887,50 @@ def train_online(cfg: TrainConfig):
                 "policy_loss": ep_policy_loss / max(1, ep_steps),
                 "value_loss": ep_value_loss / max(1, ep_steps),
                 "entropy": ep_entropy / max(1, ep_steps),
+                "approx_kl": float(ep_approx_kl),
+                "clipfrac": float(ep_clipfrac),
+                "explained_variance": float(ep_explained_variance),
+                "grad_norm": float(ep_grad_norm),
+                "SPS": float(ep_steps / max(1e-9, time.perf_counter() - ep_t0)),
+                "learning_rate": float(opt.param_groups[0]["lr"]) if len(opt.param_groups) > 0 else float(cfg.lr),
+                # episode-mean reward decomposition (derived from step-level reward_details)
+                "r_qual_mean": float(ep_r_qual / max(1, ep_steps)),
+                "r_global_mean": float(ep_r_global / max(1, ep_steps)),
+                "r_safe_mean": float(ep_r_safe / max(1, ep_steps)),
+                "r_time_mean": float(ep_r_time / max(1, ep_steps)),
+                "terminal_bonus_mean": float(ep_terminal_bonus / max(1, ep_steps)),
+                "terminal_penalty_mean": float(ep_terminal_penalty / max(1, ep_steps)),
                 "asset_breach_count": asset_breach_count,
                 "final_global_t_all": float(infos["global_t_all"]),
             }
             history[scheme_name].append(ep_stats)
+            chart_series[scheme_name].append(
+                {
+                    "episode": int(ep),
+                    # per-scheme decision-step axis (resets each episode by design in this trainer)
+                    "scheme_step": int(scheme_step[scheme_name]),
+                    "episode_return": float(ep_stats["return"]),
+                    "episode_steps": int(ep_stats["steps"]),
+                    "asset_breach_count": int(ep_stats["asset_breach_count"]),
+                    "r_qual_mean": float(ep_stats["r_qual_mean"]),
+                    "r_global_mean": float(ep_stats["r_global_mean"]),
+                    "r_safe_mean": float(ep_stats["r_safe_mean"]),
+                    "r_time_mean": float(ep_stats["r_time_mean"]),
+                    "terminal_bonus_mean": float(ep_stats["terminal_bonus_mean"]),
+                    "terminal_penalty_mean": float(ep_stats["terminal_penalty_mean"]),
+                    "policy_loss": float(ep_stats["policy_loss"]),
+                    "value_loss": float(ep_stats["value_loss"]),
+                    "entropy": float(ep_stats["entropy"]),
+                    "approx_kl": float(ep_stats["approx_kl"]),
+                    "clipfrac": float(ep_stats["clipfrac"]),
+                    "explained_variance": float(ep_stats["explained_variance"]),
+                    "grad_norm": float(ep_stats["grad_norm"]),
+                    "SPS": float(ep_stats["SPS"]),
+                    "learning_rate": float(ep_stats["learning_rate"]),
+                    "eval_return": None,
+                    "best_eval_return": float(best_eval_return[scheme_name]),
+                }
+            )
 
             ep_return_ma[scheme_name].append(ep_return)
             ep_steps_ma[scheme_name].append(ep_steps)
@@ -851,7 +945,14 @@ def train_online(cfg: TrainConfig):
                         f"{scheme_name}/episode_entropy": ep_stats["entropy"],
                         f"{scheme_name}/episode_asset_breach_count": ep_stats["asset_breach_count"],
                         f"{scheme_name}/episode_final_global_t_all": ep_stats["final_global_t_all"],
+                        f"{scheme_name}/approx_kl": ep_stats["approx_kl"],
+                        f"{scheme_name}/clipfrac": ep_stats["clipfrac"],
+                        f"{scheme_name}/explained_variance": ep_stats["explained_variance"],
+                        f"{scheme_name}/grad_norm": ep_stats["grad_norm"],
+                        f"{scheme_name}/SPS": ep_stats["SPS"],
+                        f"{scheme_name}/learning_rate": ep_stats["learning_rate"],
                         "episode": ep,
+                        f"{scheme_name}/scheme_step": scheme_step[scheme_name],
                     }
                 )
 
@@ -904,6 +1005,10 @@ def train_online(cfg: TrainConfig):
                             "episode": ep,
                         }
                     )
+                # attach eval metrics to last point so custom charts can show them
+                if len(chart_series[scheme_name]) > 0:
+                    chart_series[scheme_name][-1]["eval_return"] = float(mean_eval_return)
+                    chart_series[scheme_name][-1]["best_eval_return"] = float(best_eval_return[scheme_name])
 
                 if dist_ctx.is_main and cfg.rl_print:
                     print(
@@ -925,6 +1030,125 @@ def train_online(cfg: TrainConfig):
                     f"pi={ep_stats['policy_loss']:+.4f} v={ep_stats['value_loss']:+.4f} ent={ep_stats['entropy']:+.4f} "
                     f"fps={fps:6.1f} t_all={ep_stats['final_global_t_all']:7.2f} wall={wall/60.0:6.1f}m"
                 )
+
+            # Custom charts (wandb.plot.*) so the UI shows ready-made figures without manual dashboard setup.
+            if run is not None:
+                every = int(getattr(cfg, "wandb_custom_chart_every", 0) or 0)
+                if every > 0 and (ep % every) == 0:
+                    import wandb as _wandb
+
+                    window = int(getattr(cfg, "wandb_custom_chart_window", 0) or 0)
+                    rows = chart_series[scheme_name]
+                    if window > 0:
+                        rows = rows[-window:]
+
+                    table = _wandb.Table(
+                        data=[
+                            [
+                                r["episode"],
+                                r["scheme_step"],
+                                r["episode_return"],
+                                r["episode_steps"],
+                                r["asset_breach_count"],
+                                r["r_qual_mean"],
+                                r["r_global_mean"],
+                                r["r_safe_mean"],
+                                r["r_time_mean"],
+                                r["terminal_bonus_mean"],
+                                r["terminal_penalty_mean"],
+                                r["policy_loss"],
+                                r["value_loss"],
+                                r["entropy"],
+                                r["approx_kl"],
+                                r["clipfrac"],
+                                r["explained_variance"],
+                                r["grad_norm"],
+                                r["SPS"],
+                                r["learning_rate"],
+                                r["eval_return"],
+                                r["best_eval_return"],
+                            ]
+                            for r in rows
+                        ],
+                        columns=[
+                            "episode",
+                            "scheme_step",
+                            "episode_return",
+                            "episode_steps",
+                            "asset_breach_count",
+                            "r_qual_mean",
+                            "r_global_mean",
+                            "r_safe_mean",
+                            "r_time_mean",
+                            "terminal_bonus_mean",
+                            "terminal_penalty_mean",
+                            "policy_loss",
+                            "value_loss",
+                            "entropy",
+                            "approx_kl",
+                            "clipfrac",
+                            "explained_variance",
+                            "grad_norm",
+                            "SPS",
+                            "learning_rate",
+                            "eval_return",
+                            "best_eval_return",
+                        ],
+                    )
+
+                    run.log(
+                        {
+                            f"{scheme_name}/charts/episode_return_vs_scheme_step": _wandb.plot.line(
+                                table,
+                                x="scheme_step",
+                                y="episode_return",
+                                title="Episode Return vs Decision Steps",
+                            ),
+                            f"{scheme_name}/charts/asset_breach_vs_scheme_step": _wandb.plot.line(
+                                table,
+                                x="scheme_step",
+                                y="asset_breach_count",
+                                title="Asset Breach Count vs Decision Steps",
+                            ),
+                            f"{scheme_name}/charts/eval_return_vs_scheme_step": _wandb.plot.line(
+                                table,
+                                x="scheme_step",
+                                y="eval_return",
+                                title="Eval Return vs Decision Steps",
+                            ),
+                            # Reward decomposition (episode mean) vs decision steps
+                            f"{scheme_name}/charts/r_qual_mean_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="r_qual_mean", title="r_qual (mean) vs Decision Steps"
+                            ),
+                            f"{scheme_name}/charts/r_global_mean_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="r_global_mean", title="r_global (mean) vs Decision Steps"
+                            ),
+                            f"{scheme_name}/charts/r_safe_mean_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="r_safe_mean", title="r_safe (mean) vs Decision Steps"
+                            ),
+                            f"{scheme_name}/charts/r_time_mean_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="r_time_mean", title="r_time (mean) vs Decision Steps"
+                            ),
+                            # PPO diagnostics vs decision steps
+                            f"{scheme_name}/charts/approx_kl_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="approx_kl", title="approx_kl vs Decision Steps"
+                            ),
+                            f"{scheme_name}/charts/clipfrac_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="clipfrac", title="clipfrac vs Decision Steps"
+                            ),
+                            f"{scheme_name}/charts/explained_variance_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="explained_variance", title="explained_variance vs Decision Steps"
+                            ),
+                            f"{scheme_name}/charts/grad_norm_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="grad_norm", title="grad_norm vs Decision Steps"
+                            ),
+                            f"{scheme_name}/charts/SPS_vs_scheme_step": _wandb.plot.line(
+                                table, x="scheme_step", y="SPS", title="SPS vs Decision Steps"
+                            ),
+                            "episode": ep,
+                            f"{scheme_name}/scheme_step": scheme_step[scheme_name],
+                        }
+                    )
 
     if dist_ctx.is_main:
         for scheme_name, model in models.items():
@@ -1012,10 +1236,22 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--replay-dir", type=str, default="output/eval_traces")
     parser.add_argument("--step-frame-interval", type=int, default=1, help="Upload a training step image every N global steps (0 to disable)")
     parser.add_argument(
+        "--wandb-log-step-images",
+        type=_str2bool,
+        default=True,
+        help="Enable uploading `{scheme}/step_image` to wandb (in addition to step_frame_interval).",
+    )
+    parser.add_argument(
         "--wandb-tick-image-every",
         type=int,
         default=0,
         help="Upload a tick-level image every N inner ticks (0 to disable). Tick is a physics step inside env.step().",
+    )
+    parser.add_argument(
+        "--wandb-log-tick-images",
+        type=_str2bool,
+        default=True,
+        help="Enable uploading `{scheme}/tick_image` to wandb (in addition to wandb_tick_image_every).",
     )
     parser.add_argument("--eval-video-fps", type=int, default=10, help="FPS for eval video uploaded to wandb")
     parser.add_argument(
@@ -1025,6 +1261,18 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
         help="Every N training episodes log a full rollout video to wandb (0 to disable)",
     )
     parser.add_argument("--train-wandb-video-fps", type=int, default=10, help="FPS for training episode videos on wandb")
+    parser.add_argument(
+        "--wandb-custom-chart-every",
+        type=int,
+        default=0,
+        help="Every N episodes log ready-made wandb.plot charts (0 to disable).",
+    )
+    parser.add_argument(
+        "--wandb-custom-chart-window",
+        type=int,
+        default=200,
+        help="Window size for custom charts (0 or negative means full history).",
+    )
     parser.add_argument("--live-server-enable", type=_str2bool, default=False, help="Enable live MJPEG web server for port-forward viewing")
     parser.add_argument("--live-server-host", type=str, default="127.0.0.1", help="Live server bind host, e.g. 127.0.0.1 or 0.0.0.0")
     parser.add_argument("--live-server-port", type=int, default=8765, help="Live server port (auto-increment if occupied)")
@@ -1110,10 +1358,14 @@ def _parse_args() -> TrainConfig:
         save_replay=bool(args.save_replay),
         replay_dir=args.replay_dir,
         step_frame_interval=args.step_frame_interval,
+        wandb_log_step_images=bool(args.wandb_log_step_images),
         wandb_tick_image_every=int(args.wandb_tick_image_every),
+        wandb_log_tick_images=bool(args.wandb_log_tick_images),
         eval_video_fps=args.eval_video_fps,
         wandb_train_video_every=args.wandb_train_video_every,
         train_wandb_video_fps=args.train_wandb_video_fps,
+        wandb_custom_chart_every=int(args.wandb_custom_chart_every),
+        wandb_custom_chart_window=int(args.wandb_custom_chart_window),
         live_server_enable=bool(args.live_server_enable),
         live_server_host=str(args.live_server_host),
         live_server_port=int(args.live_server_port),

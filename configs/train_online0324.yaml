@@ -36,17 +36,17 @@ algo_print: false
 debug_step_interval: 5
 # --- 训练规模与随机性 ---
 # 总训练回合数（每个 scheme 各跑这么多 episode）
-episodes: 300
+episodes: 30000
 # 单回合最大 RL 步数（超过则 truncated），传给 TODCMARLEnv.max_episode_steps
-max_episode_steps: 200
+max_episode_steps: 400
 seed: 42
 
 # --- MAPPO（多智能体 PPO + 集中式 critic）---
 gamma: 0.99
 value_coef: 0.5
 entropy_coef: 0.01
-lr: 0.0003
-ppo_clip: 0.2
+lr: 0.0001
+ppo_clip: 0.1
 ppo_epochs: 4
 gae_lambda: 0.95
 ppo_minibatch_size: 32
@@ -81,12 +81,19 @@ time_res: 1.0
 enable_dwa_replan: true
 
 # --- 可选：传入 TODCMARLEnv(config)；obs 子字典供观测生成（如友机感知半径）---
-# env:
-#   map_root: /abs/path/to/map
-#   collision_dist: 25.0
-#   cap_dist: 200.0
-#   obs:
-#     ally_perception_radius: 50000.0
+env:
+  map_root: ./map            # 你的 map 根目录
+  time_map_mode: random      # fixed | random | cycle：每次 reset 选哪个 TimeMap
+  # time_map: 0425_214618    # 若 time_map_mode=fixed，可指定某个 TimeMap
+  # time_map_id: 0           # 可选：按可用 TimeMap 列表取模固定选择
+  evader_profile_mode: random  # random | cycle：每次 reset 选哪个 TimeEpath
+  # evader_profile_id: 0       # 可选：固定选择某个 TimeEpath（按列表取模）
+
+  # 其他你原来想传给环境的也都放这里
+  # collision_dist: 25.0
+  # cap_dist: 200.0
+  # obs:
+    # ally_perception_radius: 50000.0
 
 # --- 奖励权重（marl/rewards.py RewardConfig；仅下列字段会写入，其余键被忽略）---
 reward:
@@ -109,7 +116,7 @@ reward:
   terminal_asset_loss_penalty: 500.0
   asset_breach_radius: 40.0
   # 与距离进步相关的 shaping（0 为关闭）
-  dist_progress_scale: 0.01
+  dist_progress_scale: 0
 
 # --- Weights & Biases ---
 wandb_project: dubins-marl-online
@@ -130,14 +137,23 @@ eval_episodes: 1
 # 每多少个「全局 step」（所有 scheme 步数累加）上传一张 env.render() 到 {scheme}/step_image
 # 数值越小 wandb 上图片越密、流量/存储越大；0 表示关闭
 step_frame_interval: 10
+# 是否上传训练 step 级截图（独立于 step_frame_interval；false 时完全不上传 step_image）
+wandb_log_step_images: false
 # step 内 tick 级别图片采样频率（0 关闭）。tick 指 env.step() 内部 while 的物理推进次数。
 # 非常密集，建议 >= 50；否则 wandb 存储与网络流量会爆炸。
 wandb_tick_image_every: 50
+# 是否上传 tick 级截图（独立于 wandb_tick_image_every；false 时完全不上传 tick_image）
+wandb_log_tick_images: false
 # 评估录像 eval_video 的帧率
 eval_video_fps: 10
 # 每 N 个训练 episode 上传整段训练 rollout 视频 {scheme}/train_episode_video；0 关闭
 wandb_train_video_every: 10
 train_wandb_video_fps: 10
+# --- 代码生成图表（无需手动配置 Dashboard）---
+# 每 N 个 episode 记录一次 wandb.plot.* 图表（0 关闭）
+wandb_custom_chart_every: 10
+# 图表用到的历史窗口长度（Table 最多取最近 N 个点）；<=0 表示全量
+wandb_custom_chart_window: 0
 
 # --- 网页实时（端口转发）---
 # 启用后会在训练脚本启动一个 MJPEG 流与状态页，默认绑定 127.0.0.1，适合 SSH -L 转发。

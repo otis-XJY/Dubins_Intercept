@@ -1,0 +1,38 @@
+# python -m main.batch_env_init --config configs/env_init.yaml
+# python -m main.batch_env_build --config configs/env_build.yaml
+# python -m main.batch_evader_paths --config configs/evader_paths.yaml
+
+
+map_root: ./map
+
+# 不写 time_maps 表示自动扫描 map_root 下含 Map.jbl 的 TimeMap
+# time_maps:
+#   - "0425_231424"
+
+m_profiles: 2
+time_with_seconds: true
+
+# interactive：每条 profile 启动一次网页选点并保存 mid_points
+# replay：直接读取已存在的 points 文件（此处实现为仍从 points_file_template 读取）
+mode: interactive
+
+web_picker:
+  host: 127.0.0.1
+  port: 8765
+
+# 每条 profile 的点文件名（保存在 profile 目录内）
+points_file_template: PathMidPts.json
+
+# Evader 初始状态（Nx3: x,y,theta）
+evader:
+  init:
+    - [200, 1950, -1.57079632679]
+    - [1000, 1950, -1.57079632679]
+    - [1800, 1950, -1.57079632679]
+
+# 每个 evader 对应的设施点 id（1-based），长度必须等于 evader 数量
+value_id_list: [1, 3, 2]
+
+# 可选：覆盖 Map['Stepsize'] 用于插值
+# Stepsize: 0.01
+

@@ -21,7 +21,7 @@ if project_root not in sys.path:
 # 调用转换后的函数
 import pickle
 import argparse
-from intercept.IsoMap.WH_main_obtainMap import WH_main_obtainMapP,WH_main_obtainMapRef,WH_main_obtainIso
+from intercept.IsoMap.WH_main_obtainMap import WH_main_obtainIso, WH_main_obtainMapRef, WH_update_time_fields_from_diag
 
 
 # parser = argparse.ArgumentParser()
@@ -35,13 +35,7 @@ Map = joblib.load('./map/' + TimeMap + '/Map.jbl')
 Map['v_E'] = 20  # m/s
 Map['v_P'] = 20  # m/s
 
-Map, IsoMapP_i_tt, pathFinalP = WH_main_obtainMapP(Map, draw=False, draw_interactive=False)
-print("IsoMapP_i_tt")
-
-fast_save(IsoMapP_i_tt, 'IsoMapP_i_tt',TimeMap)
-fast_save(pathFinalP, 'pathFinalP',TimeMap)
-del IsoMapP_i_tt, pathFinalP
-gc.collect()
+WH_update_time_fields_from_diag(Map)
 
 # 严格保留变量名
 Trans_Point_verse = Map['Trans_Point'].copy()

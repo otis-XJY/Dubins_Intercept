@@ -1,0 +1,26 @@
+# python -m main.batch_env_init --config configs/env_init.yaml
+# python -m main.batch_env_build --config configs/env_build.yaml
+# python -m main.batch_evader_paths --config configs/evader_paths.yaml
+
+
+map_root: ./map
+
+# 不写 time_maps 表示自动扫描 map_root 下含 Map.jbl 的 TimeMap
+time_maps:
+  - "0425_231424"
+  - "0425_231555"
+  - "0425_231859"
+
+# 写回 Map 并用于 IsoMap 计算
+v_P: 20
+v_E: 20
+
+# 如果构建失败，是否删除整个 map/<TimeMap>/（回滚）
+cleanup_on_fail: true
+
+# 是否保留中间产物（非必须）
+keep_intermediates: false
+
+# 失败记录（jsonl，每行一个）
+failure_log: ./map/_build_failures.jsonl
+

@@ -57,7 +57,7 @@ def ppo_minibatch_update(
     max_grad_norm: float,
     minibatch_size: int,
     verbose: bool = False,
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, float, float, float, float]:
     """对一条轨迹做多轮 epoch；每步用 ``actor_forward``/``critic_forward``（支持 DDP 包装）。"""
     unwrap = model.module if hasattr(model, "module") else model
     t_max, _p = actions.shape
@@ -71,6 +71,12 @@ def ppo_minibatch_update(
     tot_pi = 0.0
     tot_v = 0.0
     tot_ent = 0.0
+    tot_approx_kl = 0.0
+    tot_clipfrac = 0.0
+    tot_grad_norm = 0.0
+    # collect prediction/target for explained variance (across minibatches/epochs)
+    ev_y = []
+    ev_yhat = []
     n_mb = 0
 
     for _ in range(ppo_epochs):
@@ -84,6 +90,8 @@ def ppo_minibatch_update(
             policy_loss_acc = 0.0
             value_loss_acc = 0.0
             ent_acc = 0.0
+            approx_kl_acc = 0.0
+            clipfrac_acc = 0.0
             n_in = 0
 
             for t in batch:
@@ -97,7 +105,8 @@ def ppo_minibatch_update(
 
                 adv = adv_t[t]
                 ret = ret_t[t]
-                ratio = torch.exp(new_logp - logp_old_t[t])
+                logratio = new_logp - logp_old_t[t]
+                ratio = torch.exp(logratio)
                 surr1 = ratio * adv
                 surr2 = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range) * adv
                 policy_loss = -torch.min(surr1, surr2).mean()
@@ -108,25 +117,47 @@ def ppo_minibatch_update(
                 policy_loss_acc += float(policy_loss.item())
                 value_loss_acc += float(value_loss.item())
                 ent_acc += float(entropy.item())
+                # PPO diagnostics (CleanRL style)
+                approx_kl = ((torch.exp(logratio) - 1.0) - logratio).mean()
+                clipfrac = (torch.abs(ratio - 1.0) > clip_range).float().mean()
+                approx_kl_acc += float(approx_kl.item())
+                clipfrac_acc += float(clipfrac.item())
+                ev_y.append(ret.detach().flatten())
+                ev_yhat.append(vals.detach().flatten())
                 n_in += 1
 
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
 
             tot_pi += policy_loss_acc / max(n_in, 1)
             tot_v += value_loss_acc / max(n_in, 1)
             tot_ent += ent_acc / max(n_in, 1)
+            tot_approx_kl += approx_kl_acc / max(n_in, 1)
+            tot_clipfrac += clipfrac_acc / max(n_in, 1)
+            tot_grad_norm += float(grad_norm) if isinstance(grad_norm, (float, int)) else float(grad_norm.item())
             n_mb += 1
 
     if n_mb == 0:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     pi_avg = tot_pi / n_mb
     v_avg = tot_v / n_mb
     ent_avg = tot_ent / n_mb
+    approx_kl_avg = tot_approx_kl / n_mb
+    clipfrac_avg = tot_clipfrac / n_mb
+    grad_norm_avg = tot_grad_norm / n_mb
+
+    explained_variance = 0.0
+    if len(ev_y) > 0:
+        y = torch.cat(ev_y, dim=0)
+        yhat = torch.cat(ev_yhat, dim=0)
+        var_y = torch.var(y)
+        if float(var_y.item()) > 1e-12:
+            explained_variance = float((1.0 - torch.var(y - yhat) / var_y).item())
     if verbose:
         print(
             f"[MAPPO] rollout_T={t_max} PPO_epochs={ppo_epochs} minibatches={n_mb} "
-            f"policy_loss={pi_avg:.5f} value_loss={v_avg:.5f} entropy={ent_avg:.5f}"
+            f"policy_loss={pi_avg:.5f} value_loss={v_avg:.5f} entropy={ent_avg:.5f} "
+            f"approx_kl={approx_kl_avg:.5f} clipfrac={clipfrac_avg:.3f} ev={explained_variance:.3f} grad={grad_norm_avg:.3f}"
         )
-    return pi_avg, v_avg, ent_avg
+    return pi_avg, v_avg, ent_avg, approx_kl_avg, clipfrac_avg, explained_variance, grad_norm_avg
 

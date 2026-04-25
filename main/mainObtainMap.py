@@ -88,7 +88,7 @@ Map['Trans_Point'] = Trans_Point
 
 # 调用 obtainMap 函数
 Map = obtainMap(Map, n_topo=15, n_blank=15, safety=20.0)
-TimeMap='0320_0920'
+TimeMap='0425_1250'
 save_dir = './map/' + TimeMap
 os.makedirs(save_dir, exist_ok=True)
 SaveName = save_dir + '/Map'

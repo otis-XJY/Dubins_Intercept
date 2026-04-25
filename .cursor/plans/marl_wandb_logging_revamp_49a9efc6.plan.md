@@ -4,19 +4,19 @@ overview: 将 W&B 训练可视化的横轴统一为“每个 scheme 的决策步
 todos:
   - id: xaxis-per-scheme-step
     content: 将 W&B 的 step 级横轴从共享 global_step 改为每个 scheme 独立的 scheme_step，并调整 define_metric + run.log 字段使曲线不交错。
-    status: pending
+    status: completed
   - id: image-upload-switches
     content: 新增 `wandb_log_step_images` 与 `wandb_log_tick_images` 两个开关（YAML+CLI+TrainConfig），分别控制 step_image/tick_image 及相关 render 开销。
-    status: pending
+    status: completed
   - id: ppo-diagnostics-metrics
     content: 在 `marl/rl/mappo.py` 补齐并返回 PPO 诊断指标（approx_kl、clipfrac、explained_variance、grad_norm），并在训练脚本中按 per-scheme 决策步上报到 W&B。
-    status: pending
+    status: completed
   - id: dashboard-metric-curation
     content: 按主流 PPO/MAPPO 面板习惯整理并命名 W&B metrics（性能、奖励分解、PPO 诊断、环境统计），确保所有奖励相关曲线横轴为 scheme_step（决策步）。
-    status: pending
+    status: completed
   - id: verify-no-model-upload
     content: 检查并保证不引入 wandb artifact/model upload；checkpoint 仅写入 `output/checkpoints/`，W&B 仅记录 metrics/图片/视频。
-    status: pending
+    status: completed
 isProject: false
 ---
 

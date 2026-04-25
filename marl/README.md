@@ -14,6 +14,10 @@
 
 ## 启动训练
 
+python -m main.batch_env_init --config configs/env_init.yaml
+python -m main.batch_env_build --config configs/env_build.yaml
+python -m main.batch_evader_paths --config configs/evader_paths.yaml
+
 ```bash
 conda activate dubins
 cd <项目根目录>

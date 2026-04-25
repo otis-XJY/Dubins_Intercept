@@ -11,3 +11,4 @@ imageio
 # 自带 ffmpeg 二进制，无显示器/无 apt 装 ffmpeg 的服务器也可写 mp4（libx264）
 imageio-ffmpeg
 Pillow
+PyYAML
