@@ -22,3 +22,5 @@ output/
 temp/
 AI/
 wandb/
+.worktrees/
+worktrees/
