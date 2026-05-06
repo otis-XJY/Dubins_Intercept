@@ -10,7 +10,7 @@ from marl.nn.models import (
 )
 
 
-def _fake_obs(bsz, a, m, ma):
+def _fake_obs(bsz, a, m, ma, n_e=2, n_v=2):
     return {
         "self_uav": torch.randn(bsz, 1, 3),
         "allies_local": torch.randn(bsz, a, 3),
@@ -25,6 +25,13 @@ def _fake_obs(bsz, a, m, ma):
         "ally_enemy_mask": torch.ones(bsz, a, dtype=torch.bool),
         "self_pts_mask": torch.ones(bsz, m, dtype=torch.bool),
         "ally_pts_mask": torch.ones(bsz, ma, dtype=torch.bool),
+        "pursuer_active": torch.ones(bsz, dtype=torch.bool),
+        "enemies": torch.randn(bsz, n_e, 3),
+        "targets": torch.randn(bsz, n_e, 2),
+        "assets": torch.randn(bsz, n_v, 2),
+        "enemy_mask": torch.ones(bsz, n_e, dtype=torch.bool),
+        "target_mask": torch.ones(bsz, n_e, dtype=torch.bool),
+        "asset_mask": torch.ones(bsz, n_v, dtype=torch.bool),
     }
 
 

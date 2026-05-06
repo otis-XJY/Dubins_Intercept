@@ -119,6 +119,18 @@ class TODCMARLEnv(gym.Env):
         # 当前路径段起始时的全局仿真时间 t_all；t 置 0 时同步更新，使得 t_all = _t_all_at_path_start + t
         self._t_all_at_path_start = 0.0
 
+        # Cached observations for rendering overlays (candidates / selections).
+        # NOTE: render() should not call _build_obs() repeatedly (performance + consistency).
+        self._last_obs: Optional[Dict[str, np.ndarray]] = None
+        self._last_obs_at_action: Optional[Dict[str, np.ndarray]] = None
+        self._last_action_indices: Optional[np.ndarray] = None
+
+        # Rendering overlays (candidates / selected point)
+        self._render_candidates = bool(self.config.get("render_candidates", True))
+        self._render_candidates_alpha = float(self.config.get("render_candidates_alpha", 0.55))
+        self._render_candidates_size = int(self.config.get("render_candidates_size", 16))
+        self._render_selected_size = int(self.config.get("render_selected_size", 70))
+
     def set_on_tick(self, cb: Optional[Callable[["TODCMARLEnv", int], None]]) -> None:
         self._on_tick = cb
 
@@ -451,18 +463,23 @@ class TODCMARLEnv(gym.Env):
         self._inferred_targets_e = None
         self._pairs_ic_compact = None  # 与 pairs_realE2P 逐行对齐的 IC 表 11–12 列紧凑 (ide,idp)
         self._fallback_paths = {}  # (pid_global, eid_global) -> 3xL path, only for TPid == -2 fallback rows
+        self._last_obs = None
+        self._last_obs_at_action = None
+        self._last_action_indices = None
 
         # main0319: 内层 _phase_update -> _advance_from_paths -> _phase_check_decision 直至 DWA 需重规划 (line 264)，再构建候选
         while not np.all(self.Capflag) and (self.t_all < self.length_E_max /self.v_E):
             self._phase_update()
+            self._validate_pair_data_integrity(context="reset:post_phase_update")
             self._advance_from_paths()
             need_replan, terminal = self._phase_check_decision()
             if terminal:
                 break
             if need_replan:
-                self._compute_isomap_intercept_candidates()
-                self._apply_hungarian_and_paths()
+                flagAllfallback = self._compute_isomap_intercept_candidates()
+                self._apply_hungarian_and_paths(flagAllfallback)
                 self._sync_assigned_eid_full_from_pairs()
+                self._validate_pair_data_integrity(context="reset:post_replan")
                 break
             self._update_capflag_from_geometry()
             self._update_capflag_full_from_geometry()
@@ -476,6 +493,7 @@ class TODCMARLEnv(gym.Env):
         self.last_min_dist_stable = self._compute_curr_min_dist_stable()
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
+        self._last_obs = obs
         info = {
             "real_mode": True,
             "replanned": True,
@@ -503,6 +521,8 @@ class TODCMARLEnv(gym.Env):
     def step(self, action_dict):
         """RL 对外一步：内层按 main0319，update -> _advance_from_paths -> _phase_check_decision 循环直至重规划或终止。"""
         _, action_indices, obs_at_action = self._normalize_action(action_dict)
+        self._last_obs_at_action = obs_at_action
+        self._last_action_indices = np.asarray(action_indices, dtype=np.int64).copy()
 
         stats = StepStats(replanned=False, collision=False, captured=0)
         delta_t_all = 0.0
@@ -513,13 +533,15 @@ class TODCMARLEnv(gym.Env):
 
         # One RL step: 先应用动作，再内层循环 main0319：update -> _advance_from_paths -> check，
         # 直至 need_replan、全局回合时间到、或其它终止。
-        self._apply_assignment_from_action(action_indices)
+        self._validate_pair_data_integrity(context="step:pre_apply_action")
+        self._apply_assignment_from_action(action_indices, obs_at_action)
 
         t_all_before = float(self.t_all)
         inner_tick_start = int(self._tick_counter)
 
         while not np.all(self.Capflag) and (self.t_all < self.length_E_max / self.v_E):
             self._phase_update()
+            self._validate_pair_data_integrity(context="step:post_phase_update")
             self._advance_from_paths()
             self._tick_counter += 1
             if self._on_tick is not None:
@@ -529,9 +551,10 @@ class TODCMARLEnv(gym.Env):
                 stats.collision = bool(self._check_collision())
                 break
             if need_replan:
-                self._compute_isomap_intercept_candidates()
-                self._apply_hungarian_and_paths()
+                flagAllfallback = self._compute_isomap_intercept_candidates()
+                self._apply_hungarian_and_paths(flagAllfallback)
                 self._sync_assigned_eid_full_from_pairs()
+                self._validate_pair_data_integrity(context="step:post_replan")
                 stats.replanned = True
                 break
             self._update_capflag_from_geometry()
@@ -563,6 +586,7 @@ class TODCMARLEnv(gym.Env):
 
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
+        self._last_obs = obs
         terminations = {f"p_{i}": done_all for i in range(self.num_P)}
         truncations = {f"p_{i}": truncated_all for i in range(self.num_P)}
         terminations["__all__"] = done_all
@@ -606,12 +630,13 @@ class TODCMARLEnv(gym.Env):
         seg_start = int(round((self.t - self.time_res / self.Stepsize) * self.v_P))
         seg_end = curr_idx_p
 
-        self.PosP = np.array([self.PathP[np.where(pid==self.UnCapPid)[0][0]][:,min(curr_idx_p, self.PathP[np.where(pid==self.UnCapPid)[0][0]].shape[1] - 1)]
+        # PathP 始终按全局 pid 索引，直接用 pid 下标访问
+        self.PosP = np.array([self.PathP[int(pid)][:,min(curr_idx_p, self.PathP[int(pid)].shape[1] - 1)]
         for pid in self.UnCapPidNew])
 
         for id,pid in enumerate(self.UnCapPidNew):
         # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
-            self.PathPtrue[pid] = np.hstack((self.PathPtrue[pid], self.PathP[np.where(pid==self.UnCapPid)[0][0]][:, max(0, seg_start) : seg_end]))
+            self.PathPtrue[int(pid)] = np.hstack((self.PathPtrue[int(pid)], self.PathP[int(pid)][:, max(0, seg_start) : seg_end]))
 
 
 
@@ -625,7 +650,7 @@ class TODCMARLEnv(gym.Env):
 
         self.PathEpre = [None] * len(self.UnCapEidNew)
         for _id, eid in enumerate(self.UnCapEidNew):
-            # PathE is stored in global-eid order; keep PathEpre aligned by global eid.
+            # PathE 始终按全局 eid 索引（_apply_paths_from_assigned_rows 按 UnCapEid[out_i] 写入）。
             self.PathEpre[_id] = self.PathE[int(eid)]
 
     def _predict_facility_ranks_for_e(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -745,11 +770,16 @@ class TODCMARLEnv(gym.Env):
                 results.append([te, tp, e2tp_tp_idx[ide], p2tp_tp_idx[idp], pair_mat, eid, pid, ide, idp])
 
         if len(results) == 0:
-            self._path_e2tp_cache = None
             # No IsoPairs: do not raise. Let `_apply_hungarian_and_paths` handle global fallback.
             self.IC_candidates = np.empty((0, 25), dtype=float)
             self._ic_best_per_pair = np.empty((0, 0), dtype=float)
-            return False
+            # 缓存路径几何，兜底分支的 _apply_paths_from_assigned_rows 仍需读取
+            self._path_e2tp_cache = path_e2tp
+            self._path_p2tp_cache = path_p2tp
+            self._e2tp_tp_idx_cache = e2tp_tp_idx
+            self._p2tp_tp_idx_cache = p2tp_tp_idx
+            self._pairs_e2val_cache = pairs_e2val
+            return True
 
         iso_pairs = np.array(results, dtype=object)
         iso_pairs = iso_pairs[np.argsort(iso_pairs[:, 0].astype(int))]
@@ -771,17 +801,12 @@ class TODCMARLEnv(gym.Env):
         self._e2tp_tp_idx_cache = e2tp_tp_idx
         self._p2tp_tp_idx_cache = p2tp_tp_idx
         self._pairs_e2val_cache = pairs_e2val
-        return True
+        return False
 
-    def _apply_hungarian_and_paths(self):
+    def _apply_hungarian_and_paths(self,flagAllfallback):
         ic_candidates = self._ic_best_per_pair
         # If intercept candidates are missing/empty (e.g. No IsoPairs), directly fall back.
-        if (
-            ic_candidates is None
-            or ic_candidates.size == 0
-            or self.IC_candidates is None
-            or (hasattr(self.IC_candidates, "size") and self.IC_candidates.size == 0)
-        ):
+        if flagAllfallback:
             self.ICFinalAssign = np.empty((0, 18), dtype=float)
             self.ICFinalActionCandidates = np.empty((0, 25), dtype=float)
             self.pairs_realE2P = None
@@ -824,6 +849,7 @@ class TODCMARLEnv(gym.Env):
 
         # fallback: fill any uncovered pursuer/evader pairs with direct P->E paths and -2 sentinel rows.
         self._apply_fallback_assignment_and_candidates()
+        self._validate_pair_data_integrity(context="hungarian:post_fallback")
 
         # 应该是model获得的action,而不是直接使用任务分配的结果
         # self._apply_paths_from_assigned_rows(assigned)
@@ -834,7 +860,6 @@ class TODCMARLEnv(gym.Env):
         It assigns remaining UnCapPid/UnCapEid via shortest direct paths (P->current E position),
         and appends -2 sentinel candidate rows into ICFinalActionCandidates. Reward will penalize -2.
         """
-        print("fallback assignment and candidates",self.UnCapPid,self.UnCapEid)
         if self.UnCapPid is None or self.UnCapEid is None:
             return
 
@@ -852,6 +877,7 @@ class TODCMARLEnv(gym.Env):
         if len(no_ans_pids) == 0 or len(no_ans_eids) == 0:
             return
 
+        print("fallback assignment and candidates",self.UnCapPid,self.UnCapEid)
         pos_p_full, pos_e_full = self._positions_full_for_obs()
         pairs = [(pid, eid) for pid in no_ans_pids for eid in no_ans_eids]
         posp_batch = np.stack([pos_p_full[pid] for pid, _ in pairs], axis=0)
@@ -960,8 +986,6 @@ class TODCMARLEnv(gym.Env):
     def _apply_paths_from_assigned_rows(self, assigned: np.ndarray):
         path_e2tp = self._path_e2tp_cache
         path_p2tp = self._path_p2tp_cache
-        if path_e2tp is None or path_p2tp is None or assigned.size == 0:
-            return
 
         e_idx = assigned[:, 11].astype(int)
         vp_idx = assigned[:, 9].astype(int)
@@ -984,10 +1008,12 @@ class TODCMARLEnv(gym.Env):
         order_e = np.argsort(e_idx)
         for out_i, row_i in enumerate(order_e):
             if int(etp_idx[row_i]) == -2 or int(vp_idx[row_i]) == -2:
+                # 兜底：E 的估计路径保持上一轮不变
                 continue
-            self.PathE[out_i] = path_e_active[row_i]
+            global_eid = int(self.UnCapEid[out_i])
+            self.PathE[global_eid] = path_e_active[row_i]
 
-        p_idx2 = assigned[:, 12].astype(int)
+        p_idx2 = assigned[:, 12].astype(int)    
         tp_to_idx = assigned[:, 10].astype(int)
         iso_p_idx = assigned[:, 14].astype(int)
         tp_from_idx = assigned[:, 3].astype(int)
@@ -1014,7 +1040,8 @@ class TODCMARLEnv(gym.Env):
             for i, idx in enumerate(p_idx2)
         ]
         for i, idx in enumerate(np.argsort(p_idx2)):
-            self.PathP[i] = path_p_active[idx]
+            global_pid = int(self.UnCapPid[i])
+            self.PathP[global_pid] = path_p_active[idx]
 
         # self.pairs_realE2P = np.column_stack((assigned[:, 11].astype(int), assigned[:, 12].astype(int)))
         self._t_all_at_path_start = float(self.t_all)
@@ -1100,6 +1127,100 @@ class TODCMARLEnv(gym.Env):
                 raise ValueError(f"pairs_realE2P has invalid eid={eid}")
             self.assigned_eid_full[pid] = eid
 
+    def _validate_pair_data_integrity(self, context: str = "") -> None:
+        """校验 pairs_realE2P / _pairs_ic_compact / UnCapEid / UnCapPid / PathE / PathP 的一致性。
+
+        在以下时机调用：
+        - _apply_hungarian_and_paths 完成后（重建配对）
+        - _phase_update 捕获过滤后（行数缩小）
+        - _apply_assignment_from_action 前（确保 IC 表查找正确）
+        - _advance_from_paths 前（确保 PathE/PathP 索引正确）
+        """
+        # --- 1. pairs_realE2P 与 _pairs_ic_compact 行数对齐 ---
+        if self.pairs_realE2P is None:
+            if self._pairs_ic_compact is not None:
+                raise ValueError(f"[{context}] pairs_realE2P is None but _pairs_ic_compact is not")
+            return  # 无配对，跳过后续检查
+        if self._pairs_ic_compact is None:
+            raise ValueError(f"[{context}] _pairs_ic_compact is None but pairs_realE2P is not")
+        pr = np.asarray(self.pairs_realE2P, dtype=np.int64)
+        pic = np.asarray(self._pairs_ic_compact, dtype=np.int64)
+        if pr.shape[0] != pic.shape[0]:
+            raise ValueError(
+                f"[{context}] row count mismatch: pairs_realE2P={pr.shape[0]} vs _pairs_ic_compact={pic.shape[0]}"
+            )
+        if pr.shape[0] == 0:
+            return
+
+        n_pairs = pr.shape[0]
+        unc_e = np.asarray(self.UnCapEid, dtype=int)
+        unc_p = np.asarray(self.UnCapPid, dtype=int)
+
+        seen_global_eids = set()
+        seen_global_pids = set()
+
+        for i in range(n_pairs):
+            g_eid, g_pid = int(pr[i, 0]), int(pr[i, 1])
+            c_eid, c_pid = int(pic[i, 0]), int(pic[i, 1])
+
+            # --- 2. 紧凑索引范围检查 ---
+            if c_eid < 0 or c_eid >= len(unc_e):
+                raise ValueError(
+                    f"[{context}] row {i}: compact eid {c_eid} out of range [0, {len(unc_e)}), "
+                    f"global eid={g_eid}, UnCapEid={unc_e.tolist()}"
+                )
+            if c_pid < 0 or c_pid >= len(unc_p):
+                raise ValueError(
+                    f"[{context}] row {i}: compact pid {c_pid} out of range [0, {len(unc_p)}), "
+                    f"global pid={g_pid}, UnCapPid={unc_p.tolist()}"
+                )
+
+            # --- 3. 紧凑索引 → 全局 ID 映射一致性 ---
+            mapped_eid = int(unc_e[c_eid])
+            mapped_pid = int(unc_p[c_pid])
+            if mapped_eid != g_eid:
+                raise ValueError(
+                    f"[{context}] row {i}: compact eid {c_eid} maps to global {mapped_eid} "
+                    f"but pairs_realE2P says {g_eid}. UnCapEid={unc_e.tolist()}"
+                )
+            if mapped_pid != g_pid:
+                raise ValueError(
+                    f"[{context}] row {i}: compact pid {c_pid} maps to global {mapped_pid} "
+                    f"but pairs_realE2P says {g_pid}. UnCapPid={unc_p.tolist()}"
+                )
+
+            # --- 4. 全局 ID 不重复（每个 E/P 只配对一次） ---
+            if g_eid in seen_global_eids:
+                raise ValueError(f"[{context}] duplicate global eid {g_eid} in pairs_realE2P")
+            if g_pid in seen_global_pids:
+                raise ValueError(f"[{context}] duplicate global pid {g_pid} in pairs_realE2P")
+            seen_global_eids.add(g_eid)
+            seen_global_pids.add(g_pid)
+
+            # --- 5. 全局 ID 未被标记为已捕获 ---
+            if self.Capflag_full is not None and g_eid < len(self.Capflag_full):
+                if bool(self.Capflag_full[g_eid]):
+                    raise ValueError(
+                        f"[{context}] row {i}: global eid {g_eid} is marked captured in Capflag_full "
+                        f"but still in pairs_realE2P"
+                    )
+
+        # --- 6. PathE/PathP 紧凑索引范围（仅在有路径时检查） ---
+        if hasattr(self, 'PathE') and self.PathE is not None:
+            for i in range(n_pairs):
+                c_eid = int(pic[i, 0])
+                if c_eid >= len(self.PathE):
+                    raise ValueError(
+                        f"[{context}] compact eid {c_eid} >= len(PathE)={len(self.PathE)}"
+                    )
+        if hasattr(self, 'PathP') and self.PathP is not None:
+            for i in range(n_pairs):
+                c_pid = int(pic[i, 1])
+                if c_pid >= len(self.PathP):
+                    raise ValueError(
+                        f"[{context}] compact pid {c_pid} >= len(PathP)={len(self.PathP)}"
+                    )
+
     def _update_capflag_full_from_geometry(self) -> int:
         """更新全局捕获标记 Capflag_full（单调置 True）。返回本次新增捕获数量。"""
         if self.Capflag_full is None:
@@ -1173,17 +1294,16 @@ class TODCMARLEnv(gym.Env):
             out[pid] = float(np.hypot(px - ex, py - ey))
         return out
 
-    def _apply_assignment_from_action(self, action_indices: np.ndarray) -> None:
+    def _apply_assignment_from_action(self, action_indices: np.ndarray, obs: Optional[Dict[str, np.ndarray]] = None) -> None:
         """Apply RL-chosen candidate rows instead of Hungarian (requires valid isomap cache).
 
         `action_indices` 为每个全局 pid 的离散候选下标（与 train 中 Categorical.sample() 一致），非概率向量。
         仅 ``pairs_realE2P`` 中仍存活的 (eid, pid) 会取候选并应用；无配对的 pid 忽略。
         """
-        if self._path_e2tp_cache is None:
-            raise ValueError("path_e2tp_cache is None")
         if self.pairs_realE2P is None or self.pairs_realE2P.size == 0:
             raise ValueError("pairs_realE2P is None")
-        obs = self._build_obs()
+        if obs is None:
+            obs = self._build_obs()
         self._sync_dynamic_k(obs)
         mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
         cols = self.obs_generator.cols
@@ -1207,6 +1327,7 @@ class TODCMARLEnv(gym.Env):
         assigned = np.vstack(assigned_rows)
         self.ICFinalAction = assigned.copy()
         self._apply_paths_from_assigned_rows(assigned)
+        self._validate_pair_data_integrity(context="apply_action:post_paths")
 
     def _pairwise_dist(self):
         pp = self.PosP[:, :2]
@@ -1266,18 +1387,14 @@ class TODCMARLEnv(gym.Env):
 
     def _positions_full_for_obs(self):
         """scatter 到全局槽位后，将非存活 id 的槽位置零，避免已拦截机几何进入 v_p/v_e 中间量。"""
-        if self.PosP.shape[0] == self.num_P and self.PosE.shape[0] == self.num_E:
-            out_p = np.asarray(self.PosP, dtype=float).copy()
-            out_e = np.asarray(self.PosE, dtype=float).copy()
-        else:
-            out_p = np.asarray(self.PStart_Point, dtype=float).copy()
-            for i in range(self.PosP.shape[0]):
-                pid = int(self.UnCapPidNew[i])
-                out_p[pid] = self.PosP[i]
-            out_e = np.asarray(self.Evader[:, :3], dtype=float).copy()
-            for i in range(self.PosE.shape[0]):
-                eid = int(self.UnCapEidNew[i])
-                out_e[eid] = self.PosE[i]
+        out_p = np.asarray(self.PStart_Point, dtype=float).copy()
+        for i in range(self.PosP.shape[0]):
+            pid = int(self.UnCapPidNew[i])
+            out_p[pid] = self.PosP[i]
+        out_e = np.asarray(self.Evader[:, :3], dtype=float).copy()
+        for i in range(self.PosE.shape[0]):
+            eid = int(self.UnCapEidNew[i])
+            out_e[eid] = self.PosE[i]
         alive_p = {int(x) for x in np.asarray(self.UnCapPidNew, dtype=np.int64).ravel()}
         alive_e = {int(x) for x in np.asarray(self.UnCapEidNew, dtype=np.int64).ravel()}
         for pid in range(self.num_P):
@@ -1513,11 +1630,14 @@ class TODCMARLEnv(gym.Env):
                     f"obtainDWAprePath 返回 BestPaths 长度 {len(best_paths)} != {n_active}"
                 )
 
+            # Keep a stable color for each active pursuer (aligned with the existing per-pair loop).
+            pid_to_color = {}
             for idx, eid in enumerate(self.UnCapEidNew):
                 eid = int(eid)
                 pid = int(self.UnCapPidNew[idx])
                 color_p = color_map((idx * 2) % 20)
                 color_e = color_map((idx * 2 + 1) % 20)
+                pid_to_color[pid] = color_p
 
                 ax.plot(
                     self.PosP[idx, 0],
@@ -1569,6 +1689,61 @@ class TODCMARLEnv(gym.Env):
 
                 bp = best_paths[idx]
                 ax.plot(bp[0, :], bp[1, :], "-", color=color_p, linewidth=2.5, zorder=3)
+
+            # Overlay: per-pursuer candidate intercept points (from cached obs) + selected highlight.
+            if self._render_candidates:
+                obs_src = self._last_obs_at_action if self._last_obs_at_action is not None else self._last_obs
+                if obs_src is not None:
+                    self_pts = np.asarray(obs_src.get("self_pts"), dtype=np.float32)
+                    self_mask = np.asarray(obs_src.get("self_pts_mask"), dtype=np.int8)
+                    if self_pts.ndim != 3 or self_mask.ndim != 2:
+                        raise RuntimeError(
+                            f"render candidates: unexpected shapes self_pts={self_pts.shape} self_pts_mask={self_mask.shape}"
+                        )
+                    if self_pts.shape[0] != self.num_P or self_mask.shape[0] != self.num_P:
+                        raise RuntimeError(
+                            f"render candidates: first dim should be num_P={self.num_P}, got self_pts={self_pts.shape}, mask={self_mask.shape}"
+                        )
+                    if self_pts.shape[1] != self_mask.shape[1]:
+                        raise RuntimeError(
+                            f"render candidates: K mismatch self_pts K={self_pts.shape[1]} mask K={self_mask.shape[1]}"
+                        )
+
+                    actions = self._last_action_indices
+                    if actions is not None:
+                        actions = np.asarray(actions, dtype=np.int64).reshape(-1)
+                        if actions.shape[0] != self.num_P:
+                            actions = None
+
+                    for pid, color_p in pid_to_color.items():
+                        pid = int(pid)
+                        m = self_mask[pid].astype(bool, copy=False)
+                        if not np.any(m):
+                            continue
+                        xy = self_pts[pid, m, :2]
+                        ax.scatter(
+                            xy[:, 0],
+                            xy[:, 1],
+                            s=self._render_candidates_size,
+                            c=[color_p],
+                            alpha=self._render_candidates_alpha,
+                            linewidths=0.0,
+                            zorder=4,
+                        )
+                        if actions is not None:
+                            sel = int(actions[pid])
+                            if 0 <= sel < self_pts.shape[1] and bool(self_mask[pid, sel]):
+                                sxy = self_pts[pid, sel, :2]
+                                ax.scatter(
+                                    [float(sxy[0])],
+                                    [float(sxy[1])],
+                                    s=self._render_selected_size,
+                                    c=[color_p],
+                                    alpha=1.0,
+                                    edgecolors="w",
+                                    linewidths=1.2,
+                                    zorder=6,
+                                )
 
         len_e_true = int(self.t_all * self.v_E)
         len_p_true = int(self.t_all * self.v_P)

@@ -84,7 +84,7 @@ enable_dwa_replan: true
 env:
   map_root: ./map            # 你的 map 根目录
   time_map_mode: random      # fixed | random | cycle：每次 reset 选哪个 TimeMap
-  # time_map: 0425_214618    # 若 time_map_mode=fixed，可指定某个 TimeMap
+  # time_map: 0425_214821    # 若 time_map_mode=fixed，可指定某个 TimeMap
   # time_map_id: 0           # 可选：按可用 TimeMap 列表取模固定选择
   evader_profile_mode: random  # random | cycle：每次 reset 选哪个 TimeEpath
   # evader_profile_id: 0       # 可选：固定选择某个 TimeEpath（按列表取模）

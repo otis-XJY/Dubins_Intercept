@@ -6,8 +6,10 @@ import argparse
 import json
 import os
 import random
+import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 from collections import deque
 
@@ -311,6 +313,12 @@ def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[s
         "self_pts_mask",
         "ally_pts_mask",
         "pursuer_active",
+        "enemies",
+        "targets",
+        "assets",
+        "enemy_mask",
+        "target_mask",
+        "asset_mask",
     }
     missing = [k for k in required_keys if k not in obs]
     if missing:
@@ -331,6 +339,12 @@ def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[s
         "self_pts_mask": _to_tensor(np.asarray(obs["self_pts_mask"], dtype=bool), device, dtype=torch.bool),
         "ally_pts_mask": _to_tensor(np.asarray(obs["ally_pts_mask"], dtype=bool), device, dtype=torch.bool),
         "pursuer_active": _to_tensor(np.asarray(obs["pursuer_active"], dtype=bool), device, dtype=torch.bool),
+        "enemies": _to_tensor(np.asarray(obs["enemies"], dtype=np.float32), device),
+        "targets": _to_tensor(np.asarray(obs["targets"], dtype=np.float32), device),
+        "assets": _to_tensor(np.asarray(obs["assets"], dtype=np.float32), device),
+        "enemy_mask": _to_tensor(np.asarray(obs["enemy_mask"], dtype=bool), device, dtype=torch.bool),
+        "target_mask": _to_tensor(np.asarray(obs["target_mask"], dtype=bool), device, dtype=torch.bool),
+        "asset_mask": _to_tensor(np.asarray(obs["asset_mask"], dtype=bool), device, dtype=torch.bool),
     }
 
 
@@ -1317,7 +1331,7 @@ def _parse_args() -> TrainConfig:
     if args.env_json:
         env_cfg = json.loads(args.env_json)
 
-    return TrainConfig(
+    cfg = TrainConfig(
         episodes=args.episodes,
         max_episode_steps=args.max_episode_steps,
         gamma=args.gamma,
@@ -1371,6 +1385,41 @@ def _parse_args() -> TrainConfig:
         live_server_port=int(args.live_server_port),
         live_stream_fps_limit=float(args.live_stream_fps_limit),
     )
+
+    # --- 基于时间戳生成运行目录 ---
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = os.path.join("output", "runs", timestamp)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # 更新 save_dir 和 replay_dir 为运行目录下的子目录
+    cfg.save_dir = os.path.join(run_dir, "checkpoints")
+    cfg.replay_dir = os.path.join(run_dir, "eval_traces")
+    os.makedirs(cfg.save_dir, exist_ok=True)
+    if cfg.save_replay:
+        os.makedirs(cfg.replay_dir, exist_ok=True)
+
+    # 保存本次训练的配置文件到运行目录（便于复现）
+    if pre_args.config:
+        config_backup_path = os.path.join(run_dir, "train_config.yaml")
+        shutil.copy2(pre_args.config, config_backup_path)
+    else:
+        # 没有配置文件时，将当前配置写入
+        config_backup_path = os.path.join(run_dir, "train_config.yaml")
+        with open(config_backup_path, "w", encoding="utf-8") as f:
+            json.dump(cfg.__dict__, f, ensure_ascii=False, indent=2, default=str)
+
+    # 更新 wandb_run_name 包含时间戳
+    if cfg.wandb_run_name:
+        cfg.wandb_run_name = f"{cfg.wandb_run_name}_{timestamp}"
+    else:
+        cfg.wandb_run_name = f"run_{timestamp}"
+
+    print(f"[RL] 运行目录: {run_dir}")
+    print(f"[RL] 检查点保存: {cfg.save_dir}")
+    print(f"[RL] 轨迹保存: {cfg.replay_dir}")
+    print(f"[RL] W&B 运行名: {cfg.wandb_run_name}")
+
+    return cfg
 
 
 def main():

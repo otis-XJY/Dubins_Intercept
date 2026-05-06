@@ -9,7 +9,7 @@ import torch.nn as nn
 class CentralCritic(nn.Module):
     """集中 critic：输入所有 agent 的 o(=h_env) 拼接，输出每机 value。
 
-    保持现有“按 P 动态重建”的策略：P 变化时重建 MLP 的输入/输出维度。
+    保持现有"按 P 动态重建"的策略：P 变化时重建 MLP 的输入/输出维度。
     """
 
     def __init__(self, embed_dim: int, hidden_dim: Optional[int] = None):
@@ -19,8 +19,8 @@ class CentralCritic(nn.Module):
         self._critic_net: Optional[nn.Module] = None
         self._critic_in_dim: Optional[int] = None
 
-    def _ensure(self, p: int, device: torch.device) -> None:
-        in_dim = p * self.embed_dim
+    def _ensure(self, p: int, per_agent_dim: int, device: torch.device) -> None:
+        in_dim = p * per_agent_dim
         if self._critic_net is None or self._critic_in_dim != in_dim:
             self._critic_in_dim = in_dim
             self._critic_net = nn.Sequential(
@@ -33,13 +33,13 @@ class CentralCritic(nn.Module):
 
     def forward(self, o: torch.Tensor) -> torch.Tensor:
         """Args:
-        o: (P, D) per-agent fused representations.
+        o: (P, D) or (P, 2D) per-agent fused representations (optionally with global state).
         """
         device = o.device
         p = int(o.shape[0])
-        self._ensure(p, device)
+        d = int(o.shape[1])
+        self._ensure(p, d, device)
         central = o.reshape(1, -1)
         assert self._critic_net is not None
         values = self._critic_net(central).squeeze(0)
         return values
-

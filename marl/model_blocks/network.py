@@ -13,6 +13,57 @@ from .fusion import ConcatMLPFusion8, SoftGatingFusion7
 from .schemes import SCHEME_KEY_TO_NAME, resolve_design_mode
 
 
+def _masked_mean(feat: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """对 feat 按 mask 做均值池化；mask 全零时返回零向量。"""
+    m = mask.float().unsqueeze(-1)  # (..., 1)
+    s = (feat * m).sum(dim=0)
+    c = m.sum(dim=0).clamp(min=1.0)
+    return (s / c).squeeze(0)
+
+
+class _GlobalStateEncoder(nn.Module):
+    """从 obs 中提取固定维度的全局状态向量（masked mean-pooling）。"""
+
+    RAW_DIM = 13  # pursuer(3) + enemy(3) + asset(2) + target(2) + ratios(3)
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(self.RAW_DIM, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    def forward(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
+        # pursuer 位置均值
+        p_feat = obs["self_uav"][:, 0, :]          # (P, 3)
+        p_mask = obs["pursuer_active"].float()      # (P,)
+        p_mean = _masked_mean(p_feat, p_mask)       # (3,)
+
+        # enemy 位置均值（取 pursuer 0 的视图，数据对所有 pursuer 重复）
+        e_feat = obs["enemies"][0]                   # (E, 3)
+        e_mask = obs["enemy_mask"][0].float()        # (E,)
+        e_mean = _masked_mean(e_feat, e_mask)        # (3,)
+
+        # asset 位置均值
+        a_feat = obs["assets"][0]                    # (V, 2)
+        a_mask = obs["asset_mask"][0].float()        # (V,)
+        a_mean = _masked_mean(a_feat, a_mask)        # (2,)
+
+        # target 位置均值
+        t_feat = obs["targets"][0]                   # (E, 2)
+        t_mask = obs["target_mask"][0].float()       # (E,)
+        t_mean = _masked_mean(t_feat, t_mask)        # (2,)
+
+        # 存活比例
+        p_ratio = p_mask.mean().unsqueeze(0)         # (1,)
+        e_ratio = e_mask.mean().unsqueeze(0)         # (1,)
+        a_ratio = a_mask.mean().unsqueeze(0)         # (1,)
+
+        raw = torch.cat([p_mean, e_mean, a_mean, t_mean, p_ratio, e_ratio, a_ratio])  # (13,)
+        return self.net(raw)  # (D,)
+
+
 class UAVInterceptionNetwork(nn.Module):
     """异构并行注意力网络（A/B/C）。
 
@@ -38,6 +89,7 @@ class UAVInterceptionNetwork(nn.Module):
 
         self.emb = TODCEmbeddings(self.hidden_dim)
         self.attn_ab = HeterogeneousAttentionAB(self.hidden_dim, self.num_heads)
+        self.global_encoder = _GlobalStateEncoder(self.hidden_dim)
 
         if self.design_mode == "A":
             self.fusion_a = ConcatMLPFusion8(self.hidden_dim)
@@ -142,8 +194,10 @@ class UAVInterceptionNetwork(nn.Module):
 
     def critic_forward(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
         _, ctx, _attn_w = self._shared_ctx(obs)
-        o = self._h_env(obs, ctx)  # (B,D) but B is actually P in this codebase
-        return self.critic(o)
+        h_env = self._h_env(obs, ctx)  # (P, D)
+        h_global = self.global_encoder(obs)  # (D,)
+        combined = torch.cat([h_env, h_global.expand(h_env.shape[0], -1)], dim=-1)  # (P, 2D)
+        return self.critic(combined)
 
     def forward(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         out = self.actor_forward(obs)

@@ -31,15 +31,22 @@ class TODCEmbeddings(nn.Module):
         self.enc_enemy = _mlp(3, hidden_dim, hidden_dim)
         self.enc_asset = _mlp(2, hidden_dim, hidden_dim)
 
+        self.norm_self = nn.LayerNorm(hidden_dim)
+        self.norm_ally = nn.LayerNorm(hidden_dim)
+        self.norm_self_pts = nn.LayerNorm(hidden_dim)
+        self.norm_ally_pts = nn.LayerNorm(hidden_dim)
+        self.norm_enemy = nn.LayerNorm(hidden_dim)
+        self.norm_asset = nn.LayerNorm(hidden_dim)
+
     def forward(
         self, obs: Dict[str, torch.Tensor]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        e_self = self.enc_self(obs["self_uav"])
-        e_ally = self.enc_ally(obs["allies_local"])
-        e_self_pts = self.enc_self_pts(obs["self_pts"])
-        e_ally_pts = self.enc_ally_pts(obs["ally_pts"])
-        e_eself = self.enc_enemy(obs["enemy_assigned_self"])
-        e_eally = self.enc_enemy(obs["enemy_assigned_per_ally"])
-        e_ast_s = self.enc_asset(obs["asset_target_self"])
-        e_ast_a = self.enc_asset(obs["asset_target_per_ally"])
+        e_self = self.norm_self(self.enc_self(obs["self_uav"]))
+        e_ally = self.norm_ally(self.enc_ally(obs["allies_local"]))
+        e_self_pts = self.norm_self_pts(self.enc_self_pts(obs["self_pts"]))
+        e_ally_pts = self.norm_ally_pts(self.enc_ally_pts(obs["ally_pts"]))
+        e_eself = self.norm_enemy(self.enc_enemy(obs["enemy_assigned_self"]))
+        e_eally = self.norm_enemy(self.enc_enemy(obs["enemy_assigned_per_ally"]))
+        e_ast_s = self.norm_asset(self.enc_asset(obs["asset_target_self"]))
+        e_ast_a = self.norm_asset(self.enc_asset(obs["asset_target_per_ally"]))
         return e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a

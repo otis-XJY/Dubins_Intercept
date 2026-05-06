@@ -1,6 +1,19 @@
 import numpy as np
 
 
+def _pairs_ic_compact_from_global(env, pairs_global: np.ndarray) -> np.ndarray:
+    """与 todc_env 中 (ceid,cpid)->(eid,pid) 约定一致，供手工注入用。"""
+    uce = np.asarray(env.UnCapEid, dtype=int)
+    ucp = np.asarray(env.UnCapPid, dtype=int)
+    out = np.zeros((pairs_global.shape[0], 2), dtype=np.int64)
+    for i in range(pairs_global.shape[0]):
+        eid, pid = int(pairs_global[i, 0]), int(pairs_global[i, 1])
+        ceid = int(np.flatnonzero(uce == eid)[0])
+        cpid = int(np.flatnonzero(ucp == pid)[0])
+        out[i, 0], out[i, 1] = ceid, cpid
+    return out
+
+
 def _setup_env_3v3(seed: int = 0):
     from marl.envs import TODCMARLEnv
 
@@ -46,12 +59,11 @@ def test_phase_update_and_advance_keep_global_eid_mapping_after_capture():
 
     # 强制设置配对为用户给出的全局配对顺序
     env.pairs_realE2P = np.asarray([[0, 2], [1, 0], [2, 1]], dtype=np.int64)
-    # _phase_update 会同步 shrink _pairs_ic_compact；这里给一个同 shape 占位即可
-    env._pairs_ic_compact = env.pairs_realE2P.copy()
-
     # 刻意让 UnCapEid/UnCapPid 与全局顺序不一致（模拟经历过重规划后被覆盖为 New 列表）
     env.UnCapEid = np.asarray([0, 2, 1], dtype=int)
     env.UnCapPid = np.asarray([2, 0, 1], dtype=int)
+    env._pairs_ic_compact = _pairs_ic_compact_from_global(env, env.pairs_realE2P)
+
     env.UnCapEidNew = env.UnCapEid.copy()
     env.UnCapPidNew = env.UnCapPid.copy()
 
@@ -87,9 +99,9 @@ def test_capture_two_rows_keeps_uncap_sets_and_pos_mapping():
         return
 
     env.pairs_realE2P = np.asarray([[0, 2], [1, 0], [2, 1]], dtype=np.int64)
-    env._pairs_ic_compact = env.pairs_realE2P.copy()
     env.UnCapEid = np.asarray([2, 0, 1], dtype=int)
     env.UnCapPid = np.asarray([1, 2, 0], dtype=int)
+    env._pairs_ic_compact = _pairs_ic_compact_from_global(env, env.pairs_realE2P)
     env.UnCapEidNew = env.UnCapEid.copy()
     env.UnCapPidNew = env.UnCapPid.copy()
 
@@ -116,9 +128,9 @@ def test_pairs_row_order_shuffled_capture_first_row_still_filters_correct_pair()
 
     # 打乱行顺序：把 (eid=0,pid=2) 放到中间行
     env.pairs_realE2P = np.asarray([[2, 1], [0, 2], [1, 0]], dtype=np.int64)
-    env._pairs_ic_compact = env.pairs_realE2P.copy()
     env.UnCapEid = np.asarray([1, 0, 2], dtype=int)
     env.UnCapPid = np.asarray([0, 2, 1], dtype=int)
+    env._pairs_ic_compact = _pairs_ic_compact_from_global(env, env.pairs_realE2P)
     env.UnCapEidNew = env.UnCapEid.copy()
     env.UnCapPidNew = env.UnCapPid.copy()
 
@@ -214,4 +226,34 @@ def test_step_forced_single_capture_keeps_posp_pose_mapping():
         expected = e_path[j, :3]
         got = np.asarray(env.PosE[row_i], dtype=float).reshape(-1)[:3]
         assert np.allclose(got, expected, atol=1e-6)
+
+
+def test_apply_paths_fallback_permuted_rows_keeps_pathE_by_global_eid():
+    """全兜底行时 PathE 只能按全局 eid 保持不变；旧逻辑按 argsort(ceid) 槽位 + continue 会写乱。"""
+    env = _setup_env_3v3(seed=0)
+    if env is None:
+        return
+    if env._path_e2tp_cache is None:
+        return
+    n = int(env.pairs_realE2P.shape[0])
+    if n < 2:
+        return
+    snap = [np.copy(x) for x in env.PathE]
+    pic = np.asarray(env._pairs_ic_compact, dtype=np.int64)
+    ic = env.ICFinalActionCandidates
+    order = list(range(n))
+    order = [order[-1]] + order[:-1]
+    rows = []
+    for k in order:
+        ceid, cpid = int(pic[k, 0]), int(pic[k, 1])
+        m = (ic[:, 11].astype(int) == ceid) & (ic[:, 12].astype(int) == cpid)
+        idx = int(np.flatnonzero(m)[0])
+        r = ic[idx].copy()
+        r[2] = -2.0
+        r[9] = -2.0
+        rows.append(r)
+    assigned = np.vstack(rows)
+    env._apply_paths_from_assigned_rows(assigned)
+    for eid in range(env.num_E):
+        assert np.array_equal(np.asarray(env.PathE[eid]), snap[eid])
 
