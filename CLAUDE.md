@@ -45,6 +45,31 @@ pytest tests/
 **Smoke verification:**
 ```bash
 python scripts/smoke_verify_env.py
+# or: python -c "from marl.envs.todc_env import smoke_test; smoke_test()"
+```
+
+**Run a single test:**
+```bash
+pytest tests/test_rewards_module.py -v
+pytest tests/test_rewards_module.py::test_function_name -v
+```
+
+**Map asset generation (prerequisite for training):**
+```bash
+python -m main.batch_env_init --config configs/env_init.yaml
+python -m main.batch_env_build --config configs/env_build.yaml
+python -m main.batch_evader_paths --config configs/evader_paths.yaml
+```
+
+**Background training:**
+```bash
+# screen (recommended)
+screen -S marl_train
+python -m marl.runners.online_train --config configs/train_online0324.yaml
+# Ctrl+A D to detach, screen -r marl_train to reattach
+
+# nohup
+nohup python -m marl.runners.online_train --config configs/train_online0324.yaml > train.log 2>&1 &
 ```
 
 ## Architecture

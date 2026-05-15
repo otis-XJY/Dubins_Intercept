@@ -3,6 +3,7 @@
 配置通过 YAML/CLI 注入 ``TrainConfig``；环境参数放在 ``env`` 字典（含 ``obs.ally_perception_radius`` 等）。
 """
 import argparse
+import contextlib
 import json
 import os
 import random
@@ -64,6 +65,8 @@ class TrainConfig:
     algo_print: bool = False
     # rollout 内每 N 个「决策步」额外打印一行（0 关闭，避免刷屏可设 5~20）
     debug_step_interval: int = 0
+    # 规划管线 print 开关（A_dubins/intercept）：False 训练时抑制，True 调试时开启
+    planner_print: bool = False
     # 每 N 个 episode 打印一次 RL 汇总（1 表示每回合都打印）
     log_interval: int = 1
     eval_interval: int = 10
@@ -99,6 +102,13 @@ class TrainConfig:
     env: Optional[Dict] = None
 
 
+def _suppress_stdout_if(quiet: bool):
+    """返回 context manager：quiet=True 时抑制 stdout（用于规划管线）。"""
+    if quiet:
+        return contextlib.redirect_stdout(open(os.devnull, "w"))
+    return contextlib.nullcontext()
+
+
 def _todc_marl_env_dict(
     cfg: TrainConfig, *, render_mode: str, force_debug_print: Optional[bool] = None
 ) -> Dict:
@@ -117,6 +127,7 @@ def _todc_marl_env_dict(
         out["debug_print"] = bool(force_debug_print)
     elif "debug_print" not in out:
         out["debug_print"] = bool(getattr(cfg, "env_print", False))
+    out["planner_print"] = bool(getattr(cfg, "planner_print", False))
     return out
 
 

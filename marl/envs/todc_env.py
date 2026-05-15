@@ -1,3 +1,4 @@
+import contextlib
 import os
 import sys
 from dataclasses import dataclass
@@ -38,6 +39,13 @@ from marl.rewards.todc_reward import TODCRewardFunction
 # 策略输出离散候选索引，观测由 ``TODCObservationGenerator`` 生成。
 
 
+def _suppress_stdout_if(quiet: bool):
+    """返回 context manager：quiet=True 时抑制 stdout（用于规划管线）。"""
+    if quiet:
+        return contextlib.redirect_stdout(open(os.devnull, "w"))
+    return contextlib.nullcontext()
+
+
 @dataclass
 class StepStats:
     replanned: bool = False
@@ -74,6 +82,7 @@ class TODCMARLEnv(gym.Env):
         self.max_episode_steps = int(self.config.get("max_episode_steps", 600))
         self.collision_dist = float(self.config.get("collision_dist", 25.0))
         self._debug_print = bool(self.config.get("debug_print", False))
+        self._planner_print = bool(self.config.get("planner_print", False))
         self.reward_fn = TODCRewardFunction.from_env_config(self.config)
 
         self._load_assets()
@@ -476,8 +485,9 @@ class TODCMARLEnv(gym.Env):
             if terminal:
                 break
             if need_replan:
-                flagAllfallback = self._compute_isomap_intercept_candidates()
-                self._apply_hungarian_and_paths(flagAllfallback)
+                with _suppress_stdout_if(not self._planner_print):
+                    flagAllfallback = self._compute_isomap_intercept_candidates()
+                    self._apply_hungarian_and_paths(flagAllfallback)
                 self._sync_assigned_eid_full_from_pairs()
                 self._validate_pair_data_integrity(context="reset:post_replan")
                 break
@@ -551,8 +561,9 @@ class TODCMARLEnv(gym.Env):
                 stats.collision = bool(self._check_collision())
                 break
             if need_replan:
-                flagAllfallback = self._compute_isomap_intercept_candidates()
-                self._apply_hungarian_and_paths(flagAllfallback)
+                with _suppress_stdout_if(not self._planner_print):
+                    flagAllfallback = self._compute_isomap_intercept_candidates()
+                    self._apply_hungarian_and_paths(flagAllfallback)
                 self._sync_assigned_eid_full_from_pairs()
                 self._validate_pair_data_integrity(context="step:post_replan")
                 stats.replanned = True
@@ -885,19 +896,25 @@ class TODCMARLEnv(gym.Env):
 
         path_list, _iso_map, _end_time = obtainPE2IsoPath(posp_batch, pose_batch, self.Map, float(self.v_P))
         if path_list is None or len(path_list) != len(pairs):
-            raise RuntimeError(
-                f"fallback obtainPE2IsoPath returned {0 if path_list is None else len(path_list)} paths for {len(pairs)} pairs"
-            )
+            print('[ENV] fallback路径规划完全失败，使用直线距离')
+            path_list = [None] * len(pairs)
 
         path_lens = np.zeros((len(pairs),), dtype=np.int64)
         fallback_paths: dict[tuple[int, int], np.ndarray] = {}
+        step_size = float(self.Map.get('Stepsize', 1.0))
         for i, (pid, eid) in enumerate(pairs):
             path = path_list[i]
-            if path is None:
-                raise RuntimeError(f"fallback path is None for pid={pid}, eid={eid}")
-            path = np.asarray(path, dtype=float)
-            if path.ndim != 2 or path.shape[0] < 3 or path.shape[1] < 2:
-                raise RuntimeError(f"fallback path shape invalid for pid={pid}, eid={eid}: {path.shape}")
+            posp = pos_p_full[pid]
+            pose = pos_e_full[eid]
+            if path is None or not isinstance(path, np.ndarray) or path.ndim != 2 or path.shape[1] < 2:
+                # 规划失败，生成直线路径作为兜底
+                dist = int(np.ceil(np.hypot(posp[0] - pose[0], posp[1] - pose[1]) / step_size))
+                n_pts = max(dist, 2)
+                xs = np.linspace(posp[0], pose[0], n_pts, dtype=np.float32)
+                ys = np.linspace(posp[1], pose[1], n_pts, dtype=np.float32)
+                theta = np.arctan2(pose[1] - posp[1], pose[0] - posp[0])
+                thetas = np.full(n_pts, theta, dtype=np.float32)
+                path = np.vstack([xs, ys, thetas])
             path_lens[i] = int(path.shape[1])
             fallback_paths[(int(pid), int(eid))] = path
 

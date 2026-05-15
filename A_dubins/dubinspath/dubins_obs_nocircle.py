@@ -8,7 +8,7 @@ from A_dubins.coreCode.SafeFlag import if_safe_point
 from A_dubins.search.update_first import update_first
 
 def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsize, pos_id, parent_id, obs_no_circle,
-                        total_field, resolution,depth,max_depth):
+                        total_field, resolution,depth,max_depth,deadline=None):
     print(f"from {parent_id} avoid {pos_id}")
 
     resolution=0.1*R
@@ -74,11 +74,12 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
 
                 print('需要插入点'+str(Insertfinal['End_Point_Cost']))
                 _,_,_,param_all_2 = A_dubins_nocircle_swarm(
-                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all, 
+                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all,
                     Stepsize, 0,
                     resolution,
                     depth=depth+1,
-                    max_depth=max_depth
+                    max_depth=max_depth,
+                    deadline=deadline
                 )
                 param_safe1=update_first(Insertfinal['param_all_1'], param_all_2)
         
@@ -136,11 +137,12 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
 
                 print('需要插入点'+str(Insertfinal['End_Point_Cost']))
                 _,_,_,param_all_2 = A_dubins_nocircle_swarm(
-                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all, 
+                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all,
                     Stepsize, 0,
                     resolution,
                     depth=depth+1,
-                    max_depth=max_depth
+                    max_depth=max_depth,
+                    deadline=deadline
                 )
                 param_safe1=update_first(Insertfinal['param_all_1'], param_all_2)
 
@@ -197,11 +199,12 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
 
                 print('需要插入点'+str(Insertfinal['End_Point_Cost']))
                 _,_,_,param_all_2 = A_dubins_nocircle_swarm(
-                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all, 
+                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all,
                     Stepsize, 0,
                     resolution,
                     depth=depth+1,
-                    max_depth=max_depth
+                    max_depth=max_depth,
+                    deadline=deadline
                 )
                 param_safe1=update_first(Insertfinal['param_all_1'], param_all_2)
     # 返回结果

@@ -1,5 +1,6 @@
 import numpy as np
 import math
+import time
 from collections import deque
 import heapq
 
@@ -16,8 +17,13 @@ from A_dubins.coreCode.obtain_safeparam import obtain_safeparam
 from A_dubins.search.update_close import update_close
 from A_dubins.coreCode.exHelp import effective_len
 
+# 规划器安全限制，防止无限循环
+_PLANNER_MAX_ITER = 500       # 主循环最大迭代次数
+_PLANNER_MAYDAY_MAX_ITER = 50  # Mayday恢复最大迭代次数
+_PLANNER_TIMEOUT_SEC = 30.0   # 单次规划超时时间（秒）
+
 def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInsert, r, obs_no_circle, outline_all, Stepsize, total_field,
-                            resolution,depth=0,max_depth=3):
+                            resolution,depth=0,max_depth=3,deadline=None):
     if depth>max_depth:
         return None,[],[],[]
     # A*算法开始
@@ -25,6 +31,9 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
     close = np.array([])
     open_f = []
     pos_id_mayday = []
+    # 初始化返回值，防止未定义变量
+    final_path = None
+    final_param = None
 
     # 初始节点
     node = {
@@ -64,7 +73,7 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
         for i in range(len(obs_to_avoid)):
             param_all_, param_best_ = dubins_obs_nocircle(
                 Start_Point, End_Point, outline_all, r, r, r, Stepsize,
-                obs_to_avoid[i], -1, obs_no_circle, total_field, resolution,depth,max_depth
+                obs_to_avoid[i], -1, obs_no_circle, total_field, resolution,depth,max_depth,deadline
             )
             # dubins_obs_nocircle returns a list of columns; extend to flatten into top-level columns list
             if isinstance(param_all_, list):
@@ -87,13 +96,21 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
         for i in range(safe_obs_num):
             open_f, open_ = check_in_open_new(param_safe, End_Point, open_f, open_, close, i)
 
+        _mayday_iter_0 = 0
         while len(open_f) == 0 or all(np.isnan(open_f)):
+            _mayday_iter_0 += 1
+            if _mayday_iter_0 > _PLANNER_MAYDAY_MAX_ITER:
+                print('[规划器] 初始Mayday恢复迭代超限，放弃')
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                print('[规划器] 初始Mayday恢复超时，放弃')
+                break
             print('open is empty! Mayday! even in begin!!')
 
             open_f, open_, pos_id_mayday = update_open_mayday(
                     Start_Point, End_Point, outline_all, r, Stepsize,
                     obs_no_circle, total_field, close, open_, open_f,
-                    pos_id_mayday, resolution,depth,max_depth
+                    pos_id_mayday, resolution,depth,max_depth,deadline
                 )
             
             times = sum(1 for x in pos_id_mayday if x == close[-1]['pos_id'])
@@ -117,6 +134,11 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
                     print('sorry, no path in begin')
                     break
 
+        # Mayday后open可能仍为空，需安全退出
+        if len(open_f) == 0:
+            print('[规划器] 初始Mayday后open仍为空，无可行路径')
+            return final_path, open_, close, final_param
+
         # 选择最短节点
         flag_min = np.argmin(open_f)
 
@@ -127,7 +149,15 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
 
 
         # 循环开始
+        _main_iter = 0
         while True:
+            _main_iter += 1
+            if _main_iter > _PLANNER_MAX_ITER:
+                print(f'[规划器] 主循环迭代超限({_PLANNER_MAX_ITER}次)，强制退出')
+                break
+            if deadline is not None and time.monotonic() > deadline:
+                print('[规划器] 主循环超时，强制退出')
+                break
             param_all = []
             param_best=[]
             # 1. 提取 point 并确保其为 2D 数组，然后取最后一列
@@ -175,7 +205,7 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
                 param_all_, param_best_ = dubins_obs_nocircle(
                     SStart_Point,
                     End_Point, outline_all, r, r, r, Stepsize,
-                    obs_to_avoid[i], close[-1]['pos_id'], obs_no_circle, total_field, resolution,depth,max_depth
+                    obs_to_avoid[i], close[-1]['pos_id'], obs_no_circle, total_field, resolution,depth,max_depth,deadline
                 )
                 if isinstance(param_all_, list):
                     param_all.extend(param_all_)
@@ -206,13 +236,21 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
 
                 times = sum(1 for x in pos_id_mayday if x == close[-1]['pos_id'])
 
+                _mayday_inner_iter = 0
                 while True:
+                    _mayday_inner_iter += 1
+                    if _mayday_inner_iter > _PLANNER_MAYDAY_MAX_ITER:
+                        print('[规划器] 内层Mayday迭代超限，跳出')
+                        break
+                    if deadline is not None and time.monotonic() > deadline:
+                        print('[规划器] 内层Mayday超时，跳出')
+                        break
                     if times >= 1:
                         print(f'add open to close more {times}')
                         open_f, open_, pos_id_mayday = update_open_mayday(
                             Start_Point, End_Point, outline_all, r, Stepsize,
                             obs_no_circle, total_field, close, open_, open_f,
-                            pos_id_mayday, resolution,depth,max_depth
+                            pos_id_mayday, resolution,depth,max_depth,deadline
                         )
 
                         sorted_indices = np.argsort(open_f)
@@ -240,9 +278,14 @@ def A_dubins_nocircle_swarm(Start_Point, End_Point, pos_idInsert, parent_idInser
                         open_f, open_, pos_id_mayday = update_open_mayday(
                             Start_Point, End_Point, outline_all, r, Stepsize,
                             obs_no_circle, total_field, close, open_, open_f,
-                            pos_id_mayday, resolution,depth,max_depth
+                            pos_id_mayday, resolution,depth,max_depth,deadline
                         )
                         break
+
+            # 内层Mayday后open可能仍为空，需安全退出
+            if len(open_f) == 0:
+                print('[规划器] 内层Mayday后open仍为空，无可行路径')
+                break
 
             # 选择最短节点
             flag_min = np.argmin(open_f)

@@ -1,7 +1,7 @@
 import numpy as np
 import time
 from intercept.IsoMap.obtainPath import obtainPath
-from A_dubins.A_dubins_nocircle_swarm import A_dubins_nocircle_swarm
+from A_dubins.A_dubins_nocircle_swarm import A_dubins_nocircle_swarm, _PLANNER_TIMEOUT_SEC
 # 假设已经定义了存储结构的类，与你示例中的 IsoMapData 对应
 from dataclasses import dataclass
 @dataclass
@@ -35,21 +35,32 @@ def obtainPE2IsoPath(PosP, PIsoPos, Map, v):
     # --- 2. 路径规划 (Dubins A*) ---
     # 此处必须使用循环处理每个 Agent 的独立路径
     start_time = time.time()
+    # 设置全局规划截止时间，防止路径规划无限循环
+    deadline = time.monotonic() + _PLANNER_TIMEOUT_SEC
     for i in range(num_agents):
         # 调用 Dubins 路径规划 (对应 MATLAB 的 A_dubins_nocircle_swarm)
         # 注意：PIsoPos[i, :] 对应 i 代理的目标 Iso 位置
         path_segments, _, _, _ = A_dubins_nocircle_swarm(
-            PosP[i, :], 
-            PIsoPos[i, :], 
-            obs, sure, r, 
-            obs_no_circle, 
-            outline_all, 
-            step_size, 
-            1, 
-            resolution
+            PosP[i, :],
+            PIsoPos[i, :],
+            obs, sure, r,
+            obs_no_circle,
+            outline_all,
+            step_size,
+            1,
+            resolution,
+            deadline=deadline
         )
-        
+
         final_pathP2Iso_segments[i] = path_segments
+
+        # 超时检查：若已超过截止时间则跳过剩余代理
+        if time.monotonic() > deadline:
+            print(f'[等时面路径] 规划超时，已完成 {i+1}/{num_agents} 个代理')
+            for j in range(i + 1, num_agents):
+                final_pathP2Iso_segments[j] = None
+                vthetaAllP2Iso[j] = np.array([])
+            break
         
         # 提取并展平 vtheta_all (速度角集合)
         vtheta_list = []

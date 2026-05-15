@@ -34,6 +34,8 @@ rl_print: true
 env_print: false
 algo_print: false
 debug_step_interval: 5
+# 规划管线（A_dubins/intercept）print 开关：false 训练时抑制，true 调试时开启
+planner_print: false
 # --- 训练规模与随机性 ---
 # 总训练回合数（每个 scheme 各跑这么多 episode）
 episodes: 30000
