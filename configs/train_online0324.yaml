@@ -66,7 +66,7 @@ ddp_find_unused_parameters: false
 # true 且非 DDP 时，对多块 GPU 使用 DataParallel（需 gpu_ids 多于 1 才真正并行）
 multi_gpu: true
 # 使用的 GPU 编号：YAML 里可写整数 1 或字符串 "0,1"；与命令行 --gpu-ids 一致
-gpu_ids: 7
+gpu_ids: 4,5
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
@@ -112,8 +112,8 @@ reward:
   safe_penalty_scale: 0.1
   # 每步时间代价、终局捕获/资产损失
   step_cost: -0.1
-  terminal_capture_bonus: 300.0
-  terminal_asset_loss_penalty: 500.0
+  terminal_capture_bonus: 30.0
+  terminal_asset_loss_penalty: 50.0
   asset_breach_radius: 40.0
   # 与距离进步相关的 shaping（0 为关闭）
   dist_progress_scale: 0
@@ -157,7 +157,7 @@ wandb_custom_chart_window: 0
 
 # --- 网页实时（端口转发）---
 # 启用后会在训练脚本启动一个 MJPEG 流与状态页，默认绑定 127.0.0.1，适合 SSH -L 转发。
-live_server_enable: true
+live_server_enable: false
 live_server_host: 0.0.0.0
 live_server_port: 8765
 # 限制推送到网页的帧率（fps）；0 表示不限制（不建议）

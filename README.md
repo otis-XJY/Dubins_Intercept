@@ -1,3 +1,13 @@
+# 方法 1: nohup
+nohup python -m marl.runners.online_train --config configs/train_online0324.yaml > train.log 2>&1 &
+
+# 方法 2: screen（推荐）
+screen -S marl_train
+python -m marl.runners.online_train --config configs/train_online0324.yaml
+# Ctrl+A D 断开，screen -r marl_train 重新连接
+
+
+
 # Dubins Intercept MARL 设计说明
 
 本仓库目前已经从最初的 Dubins 路径规划，扩展到了可在线训练的多智能体强化学习（MARL）框架。本文档聚焦 MARL 设计，帮助你后续有针对性地修改网络、奖励、环境与训练流程。

@@ -34,7 +34,7 @@ class RewardConfig:
     asset_breach_radius: float = 40.0
 
     # Fallback assignment penalty (triggered when selected reward features contain -2 sentinel)
-    fallback_penalty: float = 50.0
+    fallback_penalty: float = 5.0
 
     # Optional legacy progress term (disabled by default)
     dist_progress_scale: float = 0.0
