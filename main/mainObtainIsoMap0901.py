@@ -27,7 +27,7 @@ from intercept.IsoMap.WH_main_obtainMap import WH_main_obtainIso, WH_main_obtain
 # parser = argparse.ArgumentParser()
 # parser.add_argument('--nodraw', action='store_true', help='如果指定则不进行绘图，直接返回结果')
 # args = parser.parse_args()
-TimeMap='0320_0920'
+TimeMap='0519_2205'
 
 Map = joblib.load('./map/' + TimeMap + '/Map.jbl')	
 

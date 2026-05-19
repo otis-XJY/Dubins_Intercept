@@ -23,22 +23,21 @@ def WH_update_time_fields_from_diag(Map: dict) -> dict:
     - 该函数会更新：Map['numTime'], Map['timePlot'], Map['time'], Map['timeIsoRes']。
     """
     stepsize = float(Map["Stepsize"])
-    v_p = float(Map["v_P"])
-    mapsize_x = float(Map["mapsize_x"])
-    mapsize_y = float(Map["mapsize_y"])
+    v_p = float(Map["v_P"])#m/s
+    mapsize_x = float(Map["mapsize_x"]) #m
+    mapsize_y = float(Map["mapsize_y"]) #m
 
-    diag = float(np.hypot(mapsize_x, mapsize_y))
+    diag = float(np.hypot(mapsize_x, mapsize_y)) #m
     num_time_base = int(Map.get("numTime", 0))
     # 保持原规则：numTime = max(Maxlength*Stepsize//250, Map['numTime'])
     # 这里只是把 Maxlength 替换为 diag（单位保持与旧逻辑一致）
-    num_time = max(int(diag * stepsize // 250) if diag > 0 else num_time_base, num_time_base)
+    num_time = max(int(diag // 250) if diag > 0 else num_time_base, num_time_base) #m*m/点//m
     Map["numTime"] = num_time
 
-    if diag > 0 and v_p > 1e-12:
-        time_plot = np.linspace(1, diag / v_p, num_time)
-    else:
-        time_plot = np.linspace(1, 1, num_time) if num_time > 0 else np.asarray([], dtype=float)
-    time_arr = time_plot * stepsize
+
+    time_plot = np.linspace(1, diag / stepsize / v_p, num_time) #s*点/m
+
+    time_arr = time_plot * stepsize #s
     Map["timePlot"] = time_plot
     Map["time"] = time_arr
 

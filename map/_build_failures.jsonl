@@ -1,11 +1,1 @@
-{"time": "2026-04-25T22:38:40", "TimeMap": "0425_214751", "elapsed_s": 53.641942443326116, "error": "ValueError('attempt to get argmin of an empty sequence')"}
-{"time": "2026-04-25T22:50:28", "TimeMap": "277", "elapsed_s": 1.3425946235656738e-05, "error": "FileNotFoundError('缺少 ./map/277/Map.jbl')"}
-{"time": "2026-04-25T22:52:13", "TimeMap": "72686212", "elapsed_s": 1.3222917914390564e-05, "error": "FileNotFoundError('缺少 ./map/72686212/Map.jbl')"}
-{"time": "2026-04-25T22:52:13", "TimeMap": "72686300", "elapsed_s": 8.223578333854675e-06, "error": "FileNotFoundError('缺少 ./map/72686300/Map.jbl')"}
-{"time": "2026-04-25T22:52:30", "TimeMap": "72686212", "elapsed_s": 6.183981895446777e-06, "error": "FileNotFoundError('缺少 ./map/72686212/Map.jbl')"}
-{"time": "2026-04-25T22:52:30", "TimeMap": "72686300", "elapsed_s": 5.738809704780579e-06, "error": "FileNotFoundError('缺少 ./map/72686300/Map.jbl')"}
-{"time": "2026-04-25T22:57:24", "TimeMap": "72686212", "elapsed_s": 6.321817636489868e-06, "error": "FileNotFoundError('缺少 ./map/72686212/Map.jbl')"}
-{"time": "2026-04-25T22:57:24", "TimeMap": "72686300", "elapsed_s": 5.8300793170928955e-06, "error": "FileNotFoundError('缺少 ./map/72686300/Map.jbl')"}
-{"time": "2026-04-25T22:59:37", "TimeMap": "0425_215204", "elapsed_s": 16.0934901535511, "error": "ValueError('attempt to get argmin of an empty sequence')"}
-{"time": "2026-04-25T23:33:49", "TimeMap": "0425_231555", "elapsed_s": 370.2595963552594, "error": "ValueError('attempt to get argmin of an empty sequence')"}
-{"time": "2026-04-25T23:35:15", "TimeMap": "0425_231859", "elapsed_s": 84.47139079123735, "error": "ValueError('attempt to get argmin of an empty sequence')"}
+{"time": "2026-05-19T22:41:34", "TimeMap": "0519_222953", "elapsed_s": 28.924346923828125, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}

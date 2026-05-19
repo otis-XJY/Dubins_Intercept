@@ -150,7 +150,7 @@ class TODCMARLEnv(gym.Env):
     @property
     def sim_dt(self) -> float:
         """单步推进对应的仿真时间增量（与 main0319 中 t、t_all 同步增长量一致）。"""
-        return float(self.time_res) / float(self.Stepsize)
+        return float(self.time_res) / float(self.Stepsize) #s*点/m
 
     def _build_spaces(self):
         ally_slots = max(1, self.num_P - 1)
@@ -613,7 +613,7 @@ class TODCMARLEnv(gym.Env):
                 "captured_total_full": int(np.sum(self.Capflag_full)),
                 "captured_delta_full": int(captured_delta_full),
                 "asset_breached": bool(asset_breached),
-                "num_candidates": int(self.IC_candidates.shape[0]),
+                "num_candidates": int(self.ICFinalActionCandidates.shape[0]),
                 "delta_t_all": float(delta_t_all),
                 "t": float(self.t),
                 "t_all": float(self.t_all),
@@ -632,7 +632,7 @@ class TODCMARLEnv(gym.Env):
                 f"[ENV] decision_step={self.decision_step} ep_step={self.episode_step} "
                 f"r_mean={rmean:.4f} t_all={self.t_all:.2f} replanned={stats.replanned} "
                 f"captured_step={stats.captured} done={done_all} trunc={truncated_all} "
-                f"K={int(self.IC_candidates.shape[0])} inner_ticks={self._tick_counter - inner_tick_start}"
+                f"K={int(self.ICFinalActionCandidates.shape[0])} inner_ticks={self._tick_counter - inner_tick_start}"
             )
         return obs, rewards, terminations, truncations, infos
 

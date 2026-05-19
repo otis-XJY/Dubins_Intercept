@@ -2,10 +2,19 @@
 
 配置通过 YAML/CLI 注入 ``TrainConfig``；环境参数放在 ``env`` 字典（含 ``obs.ally_perception_radius`` 等）。
 """
+import os
+import sys
+import setproctitle
+# 根据启动方式设置进程名，便于 nvidia-smi 识别
+if "--local-rank" in " ".join(sys.argv) or "LOCAL_RANK" in os.environ:
+    # DDP 模式：显示 rank 信息
+    rank = os.environ.get("LOCAL_RANK", sys.argv[sys.argv.index("--local-rank") + 1] if "--local-rank" in sys.argv else "0")
+    setproctitle.setproctitle(f"marl_train_rank{rank}")
+else:
+    setproctitle.setproctitle("marl_train")
 import argparse
 import contextlib
 import json
-import os
 import random
 import shutil
 import time
