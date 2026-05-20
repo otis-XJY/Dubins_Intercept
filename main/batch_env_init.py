@@ -1,8 +1,12 @@
 import argparse
+import logging
 import os
 import sys
+import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from multiprocessing import get_context
+from typing import Any, Dict, Tuple
 
 import joblib
 import numpy as np
@@ -12,14 +16,11 @@ import matplotlib
 
 if os.environ.get("DISPLAY", "") == "" and os.name != "nt":
     matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 # 添加项目根目录到 Python 路径
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-
-from intercept.Map.obtainMap import obtainMap
 
 
 def _load_yaml(path: str) -> Dict[str, Any]:
@@ -45,7 +46,6 @@ def _time_tag(prefix: str = "", *, with_seconds: bool = True) -> str:
 def _ensure_unique_dir(base_dir: str) -> str:
     if not os.path.exists(base_dir):
         return base_dir
-    # 秒级时间戳在批量时仍可能碰撞，这里加后缀避免覆盖
     for k in range(1, 10000):
         cand = f"{base_dir}_{k}"
         if not os.path.exists(cand):
@@ -137,9 +137,30 @@ def _build_map_dict(map_params: Dict[str, Any]) -> Dict[str, Any]:
     return m
 
 
+def _worker_init_one(args: Tuple) -> Dict[str, Any]:
+    """单个 worker：生成一张地图。在子进程中执行。"""
+    idx, save_dir, map_base, n_topo, n_blank, safety, save_png, png_dpi = args
+    try:
+        from intercept.Map.obtainMap import obtainMap
+
+        m = dict(map_base)
+        m = obtainMap(m, n_topo=n_topo, n_blank=n_blank, safety=safety)
+        _fast_save(m, save_dir, "Map")
+        if save_png:
+            import matplotlib.pyplot as plt
+
+            png_path = os.path.join(save_dir, "Map.png")
+            plt.savefig(png_path, dpi=png_dpi)
+            plt.close("all")
+        return {"index": idx, "save_dir": save_dir, "tag": os.path.basename(save_dir), "error": None}
+    except Exception as e:
+        return {"index": idx, "save_dir": save_dir, "tag": os.path.basename(save_dir), "error": repr(e)}
+
+
 def main():
     parser = argparse.ArgumentParser(description="批量环境初始化：生成 map/<TimeMap>/Map.jbl")
     parser.add_argument("--config", required=True, help="env_init.yaml 路径")
+    parser.add_argument("--num-workers", type=int, default=None, help="并行 worker 数（覆盖 YAML 配置）")
     args = parser.parse_args()
 
     cfg = _load_yaml(args.config)
@@ -149,6 +170,10 @@ def main():
     with_seconds = bool(cfg.get("time_with_seconds", True))
     save_png = bool(cfg.get("save_png", True))
     png_dpi = int(cfg.get("png_dpi", 300))
+
+    num_workers = args.num_workers if args.num_workers is not None else int(cfg.get("num_workers", 1))
+    if num_workers <= 0:
+        num_workers = min(os.cpu_count() or 1, n_maps)
 
     map_params = cfg.get("map_params")
     if not isinstance(map_params, dict):
@@ -162,27 +187,72 @@ def main():
     n_blank = int(obtain_cfg.get("n_blank", 15))
     safety = float(obtain_cfg.get("safety", 20.0))
 
-    created = []
-    for _ in range(n_maps):
-        tag = _time_tag(prefix, with_seconds=with_seconds)
-        time_map = tag
-        save_dir = _ensure_unique_dir(os.path.join(out_root, time_map))
-        time_map = os.path.basename(save_dir)
+    # 启动信息（立即输出，不做任何耗时操作）
+    print(f"[INIT] n_maps={n_maps} num_workers={num_workers} out_root={out_root}", flush=True)
 
-        m = dict(map_base)
-        m = obtainMap(m, n_topo=n_topo, n_blank=n_blank, safety=safety)
-        _fast_save(m, save_dir, "Map")
-        if save_png:
-            # obtainMap 内部通常会绘制当前地图；这里直接保存当前 figure
-            png_path = os.path.join(save_dir, "Map.png")
-            plt.savefig(png_path, dpi=png_dpi)
-            plt.close("all")
-        created.append(time_map)
-        print(f"[INIT] created TimeMap={time_map} -> {os.path.join(save_dir, 'Map.jbl')}")
+    # 预分配唯一目录名
+    tag = _time_tag(prefix, with_seconds=with_seconds)
+    work_items = []
+    for i in range(n_maps):
+        base_dir = os.path.join(out_root, f"{tag}_{i}")
+        save_dir = _ensure_unique_dir(base_dir)
+        work_items.append((i, save_dir, map_base, n_topo, n_blank, safety, save_png, png_dpi))
 
-    print("[INIT] done. created:", created)
+    # 设置日志
+    os.makedirs(out_root, exist_ok=True)
+    log_path = os.path.join(out_root, "_batch_init.log")
+    logging.basicConfig(
+        filename=log_path,
+        level=logging.INFO,
+        format="%(asctime)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        force=True,
+    )
+    logger = logging.getLogger("batch_env_init")
+
+    ok = []
+    failed = []
+    t_start = time.perf_counter()
+
+    if num_workers == 1:
+        # 串行模式：保持原有行为
+        print(f"[INIT] 开始串行处理 {n_maps} 张地图 ...", flush=True)
+        for item in work_items:
+            result = _worker_init_one(item)
+            if result["error"] is None:
+                ok.append(result["tag"])
+                logger.info(f"[INIT] ok TimeMap={result['tag']} -> {os.path.join(result['save_dir'], 'Map.jbl')}")
+                print(f"[INIT] ok TimeMap={result['tag']}", flush=True)
+            else:
+                failed.append(result["tag"])
+                logger.error(f"[INIT] FAIL TimeMap={result['tag']} error={result['error']}")
+                print(f"[INIT] FAIL TimeMap={result['tag']} error={result['error']}", flush=True)
+    else:
+        # 并行模式：使用 fork（Linux 默认），避免 spawn 重复导入 scipy
+        ctx = get_context("fork")
+        print(f"[INIT] 启动 {num_workers} 个 worker ...", flush=True)
+        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as executor:
+            futures = {executor.submit(_worker_init_one, item): item for item in work_items}
+            done_count = 0
+            for future in as_completed(futures):
+                done_count += 1
+                result = future.result()
+                if result["error"] is None:
+                    ok.append(result["tag"])
+                    logger.info(f"[INIT] ok TimeMap={result['tag']} -> {os.path.join(result['save_dir'], 'Map.jbl')}")
+                else:
+                    failed.append(result["tag"])
+                    logger.error(f"[INIT] FAIL TimeMap={result['tag']} error={result['error']}")
+                print(f"[INIT] [{done_count}/{n_maps}] {'ok' if result['error'] is None else 'FAIL'} TimeMap={result['tag']}", flush=True)
+
+    # 汇总
+    elapsed = time.perf_counter() - t_start
+    logger.info(f"[INIT] done. ok={len(ok)}, failed={len(failed)}, elapsed={elapsed:.1f}s")
+    print(f"\n[INIT] 完成。成功: {len(ok)}, 失败: {len(failed)}, 耗时: {elapsed:.1f}s", flush=True)
+    if failed:
+        print(f"[INIT] 失败列表: {failed}", flush=True)
+    print(f"[INIT] 详细日志: {log_path}", flush=True)
 
 
 if __name__ == "__main__":
     main()
-

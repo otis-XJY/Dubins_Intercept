@@ -1,0 +1,15 @@
+2026-05-20 16:58:01 [BUILD] FAIL TimeMap=0520_164057_1 elapsed=68.12s error=TypeError("object of type 'NoneType' has no len()")
+2026-05-20 16:58:01 [BUILD] rollback removed ./map/0520_164057_1
+2026-05-20 17:01:19 [BUILD] ok TimeMap=0520_165204_4 elapsed=266.81s
+2026-05-20 17:26:25 [BUILD] FAIL TimeMap=0520_164057_0 elapsed=1772.57s error=TypeError("object of type 'NoneType' has no len()")
+2026-05-20 17:26:25 [BUILD] rollback removed ./map/0520_164057_0
+2026-05-20 17:26:43 [BUILD] FAIL TimeMap=0520_165204_3 elapsed=1790.20s error=TypeError("object of type 'NoneType' has no len()")
+2026-05-20 17:26:43 [BUILD] rollback removed ./map/0520_165204_3
+2026-05-20 17:29:27 [BUILD] FAIL TimeMap=0520_165204_0 elapsed=1953.46s error=TypeError("object of type 'NoneType' has no len()")
+2026-05-20 17:29:27 [BUILD] rollback removed ./map/0520_165204_0
+2026-05-20 17:29:27 [BUILD] done. ok=1, failed=4, elapsed=1954.6s
+2026-05-20 18:18:52 [BUILD] skip TimeMap=0520_165204_4 (IsoMapEIso2TP_i_tt.jbl already exists)
+2026-05-20 18:23:00 [BUILD] ok TimeMap=0520_172946_0 elapsed=248.51s
+2026-05-20 18:23:25 [BUILD] ok TimeMap=0520_172946_1 elapsed=273.01s
+2026-05-20 18:23:29 [BUILD] ok TimeMap=0520_172946_3 elapsed=277.04s
+2026-05-20 18:23:29 [BUILD] done. ok=3, skipped=1, failed=0, elapsed=277.4s

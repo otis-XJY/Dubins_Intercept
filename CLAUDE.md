@@ -61,6 +61,18 @@ python -m main.batch_env_build --config configs/env_build.yaml
 python -m main.batch_evader_paths --config configs/evader_paths.yaml
 ```
 
+**Parallel map generation (multi-CPU):**
+```bash
+# 通过 --num-workers 指定并行 worker 数（0=CPU 核数）
+python -m main.batch_env_init --config configs/env_init.yaml --num-workers 4
+python -m main.batch_env_build --config configs/env_build.yaml --num-workers 4
+python -m main.batch_evader_paths --config configs/evader_paths.yaml --num-workers 4  # 仅 replay 模式
+
+# 也可在 YAML 中配置 num_workers（CLI 参数优先级更高）
+```
+
+**日志**：并行模式下所有详细日志写入 `map/_batch_<stage>.log`（init/build/epath），终端只显示进度和汇总。
+
 **Background training:**
 ```bash
 # screen (recommended)

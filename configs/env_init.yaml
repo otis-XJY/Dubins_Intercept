@@ -1,10 +1,14 @@
 # python -m main.batch_env_init --config configs/env_init.yaml
 # python -m main.batch_env_build --config configs/env_build.yaml
 # python -m main.batch_evader_paths --config configs/evader_paths.yaml
+# 并行加速：--num-workers N（0=CPU 核数）
 
 
 n_maps: 5
 out_root: ./map
+
+# 并行 worker 数（1=串行，0=CPU 核数）
+num_workers: 1
 
 # TimeMap 命名：默认建议带秒，批量更不易碰撞
 time_with_seconds: true

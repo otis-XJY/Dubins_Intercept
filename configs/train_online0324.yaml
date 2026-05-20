@@ -68,7 +68,7 @@ ddp_find_unused_parameters: false
 # true 且非 DDP 时，对多块 GPU 使用 DataParallel（需 gpu_ids 多于 1 才真正并行）
 multi_gpu: true
 # 使用的 GPU 编号：YAML 里可写整数 1 或字符串 "0,1"；与命令行 --gpu-ids 一致
-gpu_ids: 4,5
+gpu_ids: 6,7
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
@@ -126,7 +126,7 @@ wandb_project: dubins-marl-online
 wandb_entity: null
 wandb_run_name: online_multi_scheme
 # online：实时上传；offline：本地缓存后同步；disabled：不初始化 wandb
-wandb_mode: disabled
+wandb_mode: online
 
 # --- 日志与评估 ---
 # 每多少 episode 打印一行训练摘要（仅 rank0）
@@ -140,7 +140,7 @@ eval_episodes: 1
 # 数值越小 wandb 上图片越密、流量/存储越大；0 表示关闭
 step_frame_interval: 10
 # 是否上传训练 step 级截图（独立于 step_frame_interval；false 时完全不上传 step_image）
-wandb_log_step_images: false
+wandb_log_step_images: ture
 # step 内 tick 级别图片采样频率（0 关闭）。tick 指 env.step() 内部 while 的物理推进次数。
 # 非常密集，建议 >= 50；否则 wandb 存储与网络流量会爆炸。
 wandb_tick_image_every: 50

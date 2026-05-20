@@ -1,1 +1,9 @@
 {"time": "2026-05-19T22:41:34", "TimeMap": "0519_222953", "elapsed_s": 28.924346923828125, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-19T22:53:07", "TimeMap": "0519_223053", "elapsed_s": 693.5255031995475, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-19T23:01:54", "TimeMap": "0519_223328", "elapsed_s": 526.3436093647033, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-19T23:03:49", "TimeMap": "0519_223358", "elapsed_s": 114.63811198808253, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-19T23:10:22", "TimeMap": "0519_223501", "elapsed_s": 392.8358936831355, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-20T16:58:01", "TimeMap": "0520_164057_1", "elapsed_s": 68.12484881468117, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-20T17:26:25", "TimeMap": "0520_164057_0", "elapsed_s": 1772.574113322422, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-20T17:26:43", "TimeMap": "0520_165204_3", "elapsed_s": 1790.1954516395926, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
+{"time": "2026-05-20T17:29:27", "TimeMap": "0520_165204_0", "elapsed_s": 1953.4615348540246, "error": "TypeError(\"object of type 'NoneType' has no len()\")"}
