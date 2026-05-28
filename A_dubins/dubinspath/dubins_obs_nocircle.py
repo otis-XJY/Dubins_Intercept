@@ -106,9 +106,9 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
         # 第二次尝试：基于 negative 点集合找最小（最远的负方向）
         distance_all_negative = distances[distances < 0]
         points_negative = points[distances < 0]
-        # if distance_all_negative.size > 0:
-        _, idx_local = np.min(distance_all_negative), np.argmin(distance_all_negative)
-        farthest_point_min = points_negative[idx_local, :]
+        if distance_all_negative.size > 0:
+            _, idx_local = np.min(distance_all_negative), np.argmin(distance_all_negative)
+            farthest_point_min = points_negative[idx_local, :]
 
         center_new2, poit_num2 = obtain_new_center(a, b, c, Start_Point, R, farthest_point_min, 2, total_field, 1, resolution)
         flag_safe2 = if_safe_point(obs_no_circle, center_new2[0], r_e)
@@ -168,9 +168,9 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
         # 第二次尝试：基于 positive 点集合找最小（最远的正方向）
         distance_all_positive  = distances[distances > 0]
         points_positive  = points[distances > 0]
-        # if distance_all_negative.size > 0:
-        _, idx_local = np.min(distance_all_positive), np.argmin(distance_all_positive )
-        farthest_point_max  = points_positive [idx_local, :]
+        if distance_all_positive.size > 0:
+            _, idx_local = np.min(distance_all_positive), np.argmin(distance_all_positive)
+            farthest_point_max  = points_positive [idx_local, :]
 
         center_new2, poit_num2 = obtain_new_center(a, b, c, Start_Point, R, farthest_point_max, 2, total_field, 1, resolution)
         flag_safe2 = if_safe_point(obs_no_circle, center_new2[0], r_e)

@@ -54,6 +54,23 @@ def obtainPE2IsoPath(PosP, PIsoPos, Map, v):
 
         final_pathP2Iso_segments[i] = path_segments
 
+        # Dubins_A 路径构建失败时，使用直线作为兜底路径
+        if path_segments is None:
+            print(f'[等时面路径] 代理 {i} Dubins_A规划失败，使用直线兜底')
+            sx, sy = PosP[i, 0], PosP[i, 1]
+            ex, ey = PIsoPos[i, 0], PIsoPos[i, 1]
+            dx, dy = ex - sx, ey - sy
+            dist = np.sqrt(dx**2 + dy**2)
+            direction = np.arctan2(dy, dx)
+            n_pts = max(int(np.ceil(dist / step_size)) + 1, 2)
+            xs = np.linspace(sx, ex, n_pts, dtype=np.float32)
+            ys = np.linspace(sy, ey, n_pts, dtype=np.float32)
+            thetas = np.full(n_pts, direction, dtype=np.float32)
+            vthetaAllP2Iso[i] = thetas
+            # 标记为直线兜底，第3步直接构造路径矩阵
+            final_pathP2Iso_segments[i] = ('straight', np.vstack([xs, ys, thetas]))
+            continue
+
         # 超时检查：若已超过截止时间则跳过剩余代理
         if time.monotonic() > deadline:
             print(f'[等时面路径] 规划超时，已完成 {i+1}/{num_agents} 个代理')
@@ -61,7 +78,7 @@ def obtainPE2IsoPath(PosP, PIsoPos, Map, v):
                 final_pathP2Iso_segments[j] = None
                 vthetaAllP2Iso[j] = np.array([])
             break
-        
+
         # 提取并展平 vtheta_all (速度角集合)
         vtheta_list = []
         if path_segments is not None:
@@ -73,15 +90,20 @@ def obtainPE2IsoPath(PosP, PIsoPos, Map, v):
                         vtheta_list.extend(k_theta)
                     else:
                         vtheta_list.append(k_theta)
-        
+
         vthetaAllP2Iso[i] = np.array(vtheta_list)
-    
+
     # --- 3. 轨迹点提取 (obtainPath) ---
     pathFinalP2Iso = [None] * num_agents
     for i in range(num_agents):
-        if final_pathP2Iso_segments[i] is not None:
-            # 转换路径段为连续的坐标点矩阵
-            pathFinalP2Iso[i] = obtainPath(final_pathP2Iso_segments[i], vthetaAllP2Iso[i], 0)
+        seg = final_pathP2Iso_segments[i]
+        if seg is not None:
+            if isinstance(seg, tuple) and seg[0] == 'straight':
+                # 直线兜底路径，直接使用预构造的矩阵
+                pathFinalP2Iso[i] = seg[1]
+            else:
+                # 转换路径段为连续的坐标点矩阵
+                pathFinalP2Iso[i] = obtainPath(seg, vthetaAllP2Iso[i], 0)
 
     # --- 4. 构造等时面映射 (IsoMapP2Iso_i_tt) ---
     IsoMapP2Iso_i_tt = [[{} for _ in range(num_time)] for _ in range(num_agents)]

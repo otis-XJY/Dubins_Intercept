@@ -70,8 +70,9 @@ def test_phase_update_and_advance_keep_global_eid_mapping_after_capture():
     # 记录 reset 后的 PathE（按全局 eid 构造的列表），用于校验 PathEpre 的引用是否对应正确全局 eid
     pathE_global = list(env.PathE)
 
-    # 模拟“捕获 pairs 第 0 行”的布尔过滤语义（Capflag[i] 与 pairs_realE2P 第 i 行对齐）
+    # 模拟”捕获 pairs 第 0 行”的过滤语义：Capflag_full 按全局 eid 标记
     env.Capflag = np.asarray([True, False, False], dtype=bool)
+    env.Capflag_full[int(env.pairs_realE2P[0, 0])] = True
     env._phase_update()
 
     assert env.pairs_realE2P.shape == (2, 2)
@@ -106,6 +107,8 @@ def test_capture_two_rows_keeps_uncap_sets_and_pos_mapping():
     env.UnCapPidNew = env.UnCapPid.copy()
 
     env.Capflag = np.asarray([True, False, True], dtype=bool)
+    env.Capflag_full[int(env.pairs_realE2P[0, 0])] = True
+    env.Capflag_full[int(env.pairs_realE2P[2, 0])] = True
     env._phase_update()
 
     assert env.pairs_realE2P.shape == (1, 2)
@@ -134,8 +137,9 @@ def test_pairs_row_order_shuffled_capture_first_row_still_filters_correct_pair()
     env.UnCapEidNew = env.UnCapEid.copy()
     env.UnCapPidNew = env.UnCapPid.copy()
 
-    # 捕获第 1 行（即 (0,2)）
+    # 捕获第 1 行（即 (0,2)），按全局 eid=0 标记 Capflag_full
     env.Capflag = np.asarray([False, True, False], dtype=bool)
+    env.Capflag_full[int(env.pairs_realE2P[1, 0])] = True
     env._phase_update()
 
     assert env.pairs_realE2P.shape == (2, 2)

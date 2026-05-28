@@ -47,6 +47,7 @@ def ppo_minibatch_update(
     logp_old: np.ndarray,
     advantages: np.ndarray,
     returns: np.ndarray,
+    old_values: np.ndarray,
     device: torch.device,
     build_obs_fn: Callable[[Dict[str, np.ndarray], torch.device], Dict[str, torch.Tensor]],
     *,
@@ -56,6 +57,7 @@ def ppo_minibatch_update(
     entropy_coef: float,
     max_grad_norm: float,
     minibatch_size: int,
+    kl_early_stop_threshold: float = 0.02,
     verbose: bool = False,
 ) -> Tuple[float, float, float, float, float, float, float]:
     """对一条轨迹做多轮 epoch；每步用 ``actor_forward``/``critic_forward``（支持 DDP 包装）。"""
@@ -67,6 +69,7 @@ def ppo_minibatch_update(
     ret_t = torch.as_tensor(returns, dtype=torch.float32, device=device)
     logp_old_t = torch.as_tensor(logp_old, dtype=torch.float32, device=device)
     act_t = torch.as_tensor(actions, dtype=torch.long, device=device)
+    old_val_t = torch.as_tensor(old_values, dtype=torch.float32, device=device)
 
     tot_pi = 0.0
     tot_v = 0.0
@@ -79,7 +82,10 @@ def ppo_minibatch_update(
     ev_yhat = []
     n_mb = 0
 
+    stop_training = False
     for _ in range(ppo_epochs):
+        if stop_training:
+            break
         np.random.shuffle(order)
         for start in range(0, t_max, minibatch_size):
             batch = order[start : start + minibatch_size]
@@ -105,12 +111,18 @@ def ppo_minibatch_update(
 
                 adv = adv_t[t]
                 ret = ret_t[t]
-                logratio = new_logp - logp_old_t[t]
+                # 防止 logratio 溢出：clamp 到 [-5, 5] 再 exp
+                logratio = torch.clamp(new_logp - logp_old_t[t], -5.0, 5.0)
                 ratio = torch.exp(logratio)
                 surr1 = ratio * adv
                 surr2 = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range) * adv
                 policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(vals, ret)
+                # value clipping：限制 critic 更新幅度
+                old_v = old_val_t[t]
+                v_clipped = old_v + torch.clamp(vals - old_v, -clip_range, clip_range)
+                vloss_unclipped = F.mse_loss(vals, ret)
+                vloss_clipped = F.mse_loss(v_clipped, ret)
+                value_loss = torch.max(vloss_unclipped, vloss_clipped)
                 loss = (policy_loss + value_coef * value_loss - entropy_coef * entropy) / len(batch)
 
                 loss.backward()
@@ -125,6 +137,15 @@ def ppo_minibatch_update(
                 ev_y.append(ret.detach().flatten())
                 ev_yhat.append(vals.detach().flatten())
                 n_in += 1
+
+            # KL early stopping：approx_kl 过大时提前终止本 epoch 的后续 minibatch
+            if n_in > 0 and kl_early_stop_threshold > 0:
+                mb_approx_kl = approx_kl_acc / n_in
+                if mb_approx_kl > kl_early_stop_threshold:
+                    if verbose:
+                        print(f"[MAPPO] KL early stop: approx_kl={mb_approx_kl:.5f} > {kl_early_stop_threshold}")
+                    stop_training = True
+                    break
 
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()

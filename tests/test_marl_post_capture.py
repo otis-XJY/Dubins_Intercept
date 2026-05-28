@@ -33,20 +33,24 @@ def test_manual_one_flag_true_phase_update_filters_pairs_and_uncap(env_ready):
     assert not np.any(env.Capflag)
 
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
 
     assert env.pairs_realE2P.shape[0] == ne - 1
     assert len(env.UnCapPidNew) == ne - 1
     assert len(env.UnCapEidNew) == ne - 1
-    # Capflag 未被 _phase_update 截短，仍与初始几何步一致
-    assert env.Capflag.shape[0] == ne
+    # Capflag_full 未被 _phase_update 截短，仍为全局长度
+    assert env.Capflag_full.shape[0] == ne
 
 
 def test_second_phase_update_skipped_when_pairs_shorter_than_capflag(env_ready):
-    """第一次过滤后 pairs 行数 < Capflag 长度，门控失败，后续 _phase_update 不再改 pairs/UnCap。"""
+    """第一次过滤后 pairs 行数 < Capflag_full 长度，后续 _phase_update 不再改 pairs/UnCap。"""
     env = env_ready
     ne = env.num_E
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
 
     pairs_after = env.pairs_realE2P.copy()
@@ -58,13 +62,15 @@ def test_second_phase_update_skipped_when_pairs_shorter_than_capflag(env_ready):
     assert np.array_equal(env.pairs_realE2P, pairs_after)
     assert np.array_equal(env.UnCapPidNew, uncap_p)
     assert np.array_equal(env.UnCapEidNew, uncap_e)
-    assert env.pairs_realE2P.shape[0] != env.Capflag.shape[0]
+    assert env.pairs_realE2P.shape[0] != env.Capflag_full.shape[0]
 
 
 def test_advance_from_paths_uses_row_count_of_uncap_pid_new(env_ready):
     """捕获一人造后 UnCapPidNew 变短，_advance_from_paths 产生 compact PosP。"""
     env = env_ready
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
 
     env._advance_from_paths()
@@ -76,6 +82,8 @@ def test_update_capflag_geometry_resizes_capflag_to_match_pos_e(env_ready):
     """几何更新按当前 PosE 行数重写 Capflag；与「未截短的旧 Capflag」长度可对齐或不对齐。"""
     env = env_ready
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
     env._advance_from_paths()
 
@@ -95,6 +103,8 @@ def test_second_wave_capture_after_capflag_resized(env_ready):
         pytest.skip("需要至少 2 架敌机")
 
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
     assert env.pairs_realE2P.shape[0] == ne - 1
 
@@ -104,6 +114,8 @@ def test_second_wave_capture_after_capflag_resized(env_ready):
     assert env.pairs_realE2P.shape[0] == ne - 1
 
     env.Capflag[0] = True
+    cap_eid2 = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid2] = True
     env._phase_update()
     assert env.pairs_realE2P.shape[0] == ne - 2
     assert len(env.UnCapEidNew) == ne - 2
@@ -136,6 +148,8 @@ def test_normalize_action_inactive_pursuer_index_minus_one(env_ready):
     """部分捕获后无任务机动作 -1，_normalize_action 不报错的且 idx 为 -1。"""
     env = env_ready
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
     env._advance_from_paths()
     env._update_capflag_from_geometry()
@@ -159,6 +173,8 @@ def test_build_obs_after_partial_manual_capture_shapes(env_ready):
     """人工标一敌捕获并同步几何后，观测首维仍为 num_P（Gym 批维不变）。"""
     env = env_ready
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
     env._advance_from_paths()
     env._update_capflag_from_geometry()
@@ -182,10 +198,12 @@ def test_captured_total_matches_sum_capflag_on_normal_step(env_ready):
 
 
 def test_capflag_row_i_pairs_with_pairs_row_i_not_global_eid(env_ready):
-    """_phase_update 中 ``Capflag[i]`` 与 ``pairs_realE2P`` 第 i 行对齐（与 main0319 布尔过滤一致），非按全局 eid 查表。"""
+    """_phase_update 按 Capflag_full[global_eid] 过滤 pairs_realE2P。"""
     env = env_ready
     pr = env.pairs_realE2P.copy()
     env.Capflag[0] = True
+    cap_eid = int(pr[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
     assert env.pairs_realE2P.shape[0] == pr.shape[0] - 1
     r0 = (int(pr[0, 0]), int(pr[0, 1]))
@@ -194,10 +212,13 @@ def test_capflag_row_i_pairs_with_pairs_row_i_not_global_eid(env_ready):
 
 
 def test_pairwise_dist_shape_after_compact_geometry(env_ready):
-    """紧凑 PosP/PosE 下距离阵为 (nP_compact, nE_active)。"""
+    """紧凑 PosP/PosE 下 _pairwise_dist 返回 element-wise 距离 (1D, 长度=min(nP,nE))。"""
     env = env_ready
     env.Capflag[0] = True
+    cap_eid = int(env.pairs_realE2P[0, 0])
+    env.Capflag_full[cap_eid] = True
     env._phase_update()
     env._advance_from_paths()
     d = env._pairwise_dist()
-    assert d.shape == (env.PosP.shape[0], env.PosE.shape[0])
+    assert d.ndim == 1
+    assert d.shape[0] == min(env.PosP.shape[0], env.PosE.shape[0])

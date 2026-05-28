@@ -477,7 +477,7 @@ class TODCMARLEnv(gym.Env):
         self._last_action_indices = None
 
         # main0319: 内层 _phase_update -> _advance_from_paths -> _phase_check_decision 直至 DWA 需重规划 (line 264)，再构建候选
-        while not np.all(self.Capflag) and (self.t_all < self.length_E_max /self.v_E):
+        while not np.all(self.Capflag_full) and (self.t_all < self.length_E_max /self.v_E):
             self._phase_update()
             self._validate_pair_data_integrity(context="reset:post_phase_update")
             self._advance_from_paths()
@@ -549,7 +549,7 @@ class TODCMARLEnv(gym.Env):
         t_all_before = float(self.t_all)
         inner_tick_start = int(self._tick_counter)
 
-        while not np.all(self.Capflag) and (self.t_all < self.length_E_max / self.v_E):
+        while not np.all(self.Capflag_full) and (self.t_all < self.length_E_max / self.v_E):
             self._phase_update()
             self._validate_pair_data_integrity(context="step:post_phase_update")
             self._advance_from_paths()
@@ -1072,8 +1072,9 @@ class TODCMARLEnv(gym.Env):
         dt = self.sim_dt
         self.t += dt
         self.t_all += dt
-        if self.pairs_realE2P is not None and self.pairs_realE2P.shape[0] == self.Capflag.shape[0]:
-            keep = ~self.Capflag
+        if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
+            global_eids = np.asarray(self.pairs_realE2P[:, 0], dtype=np.int64)
+            keep = ~np.asarray(self.Capflag_full, dtype=bool)[global_eids]
             self.UnCapPidNew = self.pairs_realE2P[keep, 1].astype(int)
             self.UnCapEidNew = self.pairs_realE2P[keep, 0].astype(int)
             self.pairs_realE2P = self.pairs_realE2P[keep]
@@ -1088,7 +1089,7 @@ class TODCMARLEnv(gym.Env):
         if self._check_asset_breach():
             return False, True
         
-        if self.num_E > 0 and np.all(self.Capflag):
+        if self.num_E > 0 and np.all(self.Capflag_full):
             return False, True
         need_replan = False
         if self.enable_dwa_replan:

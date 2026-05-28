@@ -46,12 +46,16 @@ seed: 42
 # --- MAPPO（多智能体 PPO + 集中式 critic）---
 gamma: 0.99
 value_coef: 0.5
-entropy_coef: 0.01
-lr: 0.0001
-ppo_clip: 0.1
+entropy_coef: 0.02
+lr: 0.0003
+ppo_clip: 0.2
 ppo_epochs: 4
 gae_lambda: 0.95
 ppo_minibatch_size: 32
+# 训练稳定性（防止价值函数发散 / 梯度爆炸）
+kl_early_stop_threshold: 0.03   # approx_kl 超过此值时提前终止 PPO 更新
+advantage_clip: 5.0             # advantage 归一化后裁剪范围（0 关闭）
+lr_decay: true                  # 线性衰减学习率到初始值的 10%
 
 # --- 网络结构（marl/nn/models.py TODCHeteroActorCritic）---
 hidden_dim: 128
@@ -61,14 +65,14 @@ num_heads: 4
 # 例如 cuda:0；无 GPU 时用 cpu。若写 cuda 但机器无 CUDA，训练脚本会直接报错（不静默降级）
 device: cuda:0
 # true 时使用 torch.distributed（需用 torchrun 并设置 RANK/WORLD_SIZE/LOCAL_RANK 等）
-distributed: false
+distributed: true
 # 多机多卡时常用 nccl；纯 CPU 分布式可用 gloo
 ddp_backend: nccl
 ddp_find_unused_parameters: false
 # true 且非 DDP 时，对多块 GPU 使用 DataParallel（需 gpu_ids 多于 1 才真正并行）
-multi_gpu: true
+multi_gpu: false
 # 使用的 GPU 编号：YAML 里可写整数 1 或字符串 "0,1"；与命令行 --gpu-ids 一致
-gpu_ids: 6,7
+gpu_ids: 0,4
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
@@ -118,7 +122,7 @@ reward:
   terminal_asset_loss_penalty: 50.0
   asset_breach_radius: 40.0
   # 与距离进步相关的 shaping（0 为关闭）
-  dist_progress_scale: 0
+  dist_progress_scale: 0.01
 
 # --- Weights & Biases ---
 wandb_project: dubins-marl-online
@@ -140,7 +144,7 @@ eval_episodes: 1
 # 数值越小 wandb 上图片越密、流量/存储越大；0 表示关闭
 step_frame_interval: 10
 # 是否上传训练 step 级截图（独立于 step_frame_interval；false 时完全不上传 step_image）
-wandb_log_step_images: ture
+wandb_log_step_images: true
 # step 内 tick 级别图片采样频率（0 关闭）。tick 指 env.step() 内部 while 的物理推进次数。
 # 非常密集，建议 >= 50；否则 wandb 存储与网络流量会爆炸。
 wandb_tick_image_every: 50

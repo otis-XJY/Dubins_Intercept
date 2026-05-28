@@ -61,6 +61,10 @@ class TrainConfig:
     ppo_epochs: int = 4
     gae_lambda: float = 0.95
     ppo_minibatch_size: int = 32
+    # 训练稳定性（防止价值函数发散 / 梯度爆炸）
+    kl_early_stop_threshold: float = 0.02
+    advantage_clip: float = 5.0
+    lr_decay: bool = True
     reward: Optional[Dict] = None
     wandb_project: str = "dubins-marl-online"
     wandb_entity: Optional[str] = None
@@ -607,6 +611,13 @@ def train_online(cfg: TrainConfig):
             _todc_marl_env_dict(cfg, render_mode="rgb_array" if need_train_rgb else "none")
         )
         opts[scheme_name] = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+    # 学习率调度器：线性衰减到初始 LR 的 10%
+    schedulers: Dict[str, torch.optim.lr_scheduler.LRScheduler] = {}
+    if cfg.lr_decay:
+        for scheme_name, opt in opts.items():
+            schedulers[scheme_name] = torch.optim.lr_scheduler.LinearLR(
+                opt, start_factor=1.0, end_factor=0.1, total_iters=max(1, cfg.episodes)
+            )
 
     history = {name: [] for name in models.keys()}
     chart_series = {name: [] for name in models.keys()}  # points for wandb.Table / wandb.plot.*
@@ -867,6 +878,8 @@ def train_online(cfg: TrainConfig):
                     lam=cfg.gae_lambda,
                 )
                 adv_np = (adv_np - adv_np.mean()) / (adv_np.std() + 1e-8)
+                if cfg.advantage_clip > 0:
+                    adv_np = np.clip(adv_np, -cfg.advantage_clip, cfg.advantage_clip)
 
                 if ep_log and cfg.algo_print:
                     print(
@@ -891,6 +904,7 @@ def train_online(cfg: TrainConfig):
                     logp_np,
                     adv_np,
                     ret_np,
+                    values_np,
                     device,
                     _build_model_obs,
                     clip_range=cfg.ppo_clip,
@@ -899,6 +913,7 @@ def train_online(cfg: TrainConfig):
                     entropy_coef=cfg.entropy_coef,
                     max_grad_norm=1.0,
                     minibatch_size=max(1, min(cfg.ppo_minibatch_size, len(ro_obs))),
+                    kl_early_stop_threshold=cfg.kl_early_stop_threshold,
                     verbose=bool(ep_log and cfg.algo_print),
                 )
 
@@ -1184,6 +1199,10 @@ def train_online(cfg: TrainConfig):
                         }
                     )
 
+            # 学习率衰减：每个 episode 结束后 step 一次
+            if scheme_name in schedulers:
+                schedulers[scheme_name].step()
+
     if dist_ctx.is_main:
         for scheme_name, model in models.items():
             ckpt_path = os.path.join(cfg.save_dir, f"{scheme_name.replace(' ', '_')}_last.pt")
@@ -1226,6 +1245,9 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--ppo-minibatch-size", type=int, default=32)
+    parser.add_argument("--kl-early-stop-threshold", type=float, default=0.02)
+    parser.add_argument("--advantage-clip", type=float, default=5.0)
+    parser.add_argument("--lr-decay", type=_str2bool, default=True)
     parser.add_argument("--reward-json", type=str, default=None, help="Inline JSON for reward config")
     parser.add_argument(
         "--env-json",
@@ -1374,6 +1396,9 @@ def _parse_args() -> TrainConfig:
         ppo_epochs=int(args.ppo_epochs),
         gae_lambda=float(args.gae_lambda),
         ppo_minibatch_size=int(args.ppo_minibatch_size),
+        kl_early_stop_threshold=float(args.kl_early_stop_threshold),
+        advantage_clip=float(args.advantage_clip),
+        lr_decay=bool(args.lr_decay),
         reward=reward_cfg,
         env=env_cfg,
         wandb_project=args.wandb_project,

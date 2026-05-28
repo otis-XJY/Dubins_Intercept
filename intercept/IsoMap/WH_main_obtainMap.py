@@ -85,6 +85,13 @@ def WH_main_obtainMapP(Map, draw=True, draw_interactive=False):
                 depth=0,max_depth=1
             )
 
+            if final_pathUAV[i, j] is None:
+                print(f'[路径规划] UAV {i} -> Target {j} 规划失败，跳过')
+                vthetaAllP[i, j] = np.array([])
+                pathFinalP[i][j] = None
+                vthetaAll_ = []
+                continue
+
             # 提取路径中的速度信息（vtheta_all 表示路径中每个点的速度角度）
             for tt in range(len(final_pathUAV[i, j]) - 1):
                 for k in range(len(final_pathUAV[i, j][tt + 1]['vtheta_all'])):

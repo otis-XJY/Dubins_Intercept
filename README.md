@@ -6,6 +6,20 @@ screen -S marl_train
 python -m marl.runners.online_train --config configs/train_online0324.yaml
 # Ctrl+A D 断开，screen -r marl_train 重新连接
 
+# 启动 tmux 会话
+tmux new -s marl_train
+
+# 在会话中启动训练
+python -m marl.runners.online_train --config configs/train_online0324.yaml
+
+# 断开会话（训练继续运行）
+# 按 Ctrl+B，然后按 D
+
+# 重新连接
+tmux attach -t marl_train
+
+# 查看所有会话
+tmux ls
 
 
 # Dubins Intercept MARL 设计说明
