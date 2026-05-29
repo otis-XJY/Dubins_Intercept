@@ -453,7 +453,6 @@ class TODCMARLEnv(gym.Env):
             for eid in range(self.num_E)
         ]
 
-        self.Capflag = np.array([False] * self.num_E) #连续的
         self.Capflag_full = np.zeros((self.num_E,), dtype=bool)
         self.pairs_realE2P = None #实际的id，构造观测的标准
         self.UnCapPid = np.arange(self.num_P, dtype=int) #实际的id
@@ -480,6 +479,7 @@ class TODCMARLEnv(gym.Env):
         while not np.all(self.Capflag_full) and (self.t_all < self.length_E_max /self.v_E):
             self._phase_update()
             self._validate_pair_data_integrity(context="reset:post_phase_update")
+            self._validate_capflag_consistency(context="reset:post_phase_update")
             self._advance_from_paths()
             need_replan, terminal = self._phase_check_decision()
             if terminal:
@@ -491,7 +491,6 @@ class TODCMARLEnv(gym.Env):
                 self._sync_assigned_eid_full_from_pairs()
                 self._validate_pair_data_integrity(context="reset:post_replan")
                 break
-            self._update_capflag_from_geometry()
             self._update_capflag_full_from_geometry()
 
         if self._inferred_targets_e is None:
@@ -552,6 +551,7 @@ class TODCMARLEnv(gym.Env):
         while not np.all(self.Capflag_full) and (self.t_all < self.length_E_max / self.v_E):
             self._phase_update()
             self._validate_pair_data_integrity(context="step:post_phase_update")
+            self._validate_capflag_consistency(context="step:post_phase_update")
             self._advance_from_paths()
             self._tick_counter += 1
             if self._on_tick is not None:
@@ -568,7 +568,6 @@ class TODCMARLEnv(gym.Env):
                 self._validate_pair_data_integrity(context="step:post_replan")
                 stats.replanned = True
                 break
-            self._update_capflag_from_geometry()
             self._update_capflag_full_from_geometry()
 
         captured_delta_full = int(np.sum(self.Capflag_full) - np.sum(prev_cap_full))
@@ -594,6 +593,21 @@ class TODCMARLEnv(gym.Env):
         time_exceeded = self.t_all >= max_t - 1e-9
         done_all = bool(np.all(self.Capflag_full) or stats.collision or asset_breached or time_exceeded)
         truncated_all = bool(self.episode_step >= self.max_episode_steps)
+
+        # 终止原因诊断日志
+        if done_all:
+            reasons = []
+            if np.all(self.Capflag_full):
+                reasons.append(f"all_captured({int(np.sum(self.Capflag_full))}/{self.num_E})")
+            if stats.collision:
+                reasons.append("pursuer_collision")
+            if asset_breached:
+                reasons.append("asset_breached")
+            if time_exceeded:
+                reasons.append(f"time_exceeded(t_all={self.t_all:.1f}>={max_t:.1f})")
+            print(f"[TERMINATE] step={self.decision_step} reasons={reasons} "
+                  f"Capflag_full={self.Capflag_full.tolist()} "
+                  f"pairs_remaining={0 if self.pairs_realE2P is None else self.pairs_realE2P.shape[0]}")
 
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
@@ -1068,13 +1082,18 @@ class TODCMARLEnv(gym.Env):
 
     def _phase_update(self) -> None:
         """main0319:204-216 — 时间推进并同步未捕获 E-P 配对。"""
-        # 如果有捕获，但是分配不改变，则会
         dt = self.sim_dt
         self.t += dt
         self.t_all += dt
         if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
             global_eids = np.asarray(self.pairs_realE2P[:, 0], dtype=np.int64)
             keep = ~np.asarray(self.Capflag_full, dtype=bool)[global_eids]
+            n_dropped = int(np.sum(~keep))
+            if n_dropped > 0:
+                dropped_pairs = self.pairs_realE2P[~keep]
+                for dp in dropped_pairs:
+                    print(f"[PHASE_UPDATE] t_all={self.t_all:.3f} 过滤已捕获配对: "
+                          f"eid={int(dp[0])}, pid={int(dp[1])}")
             self.UnCapPidNew = self.pairs_realE2P[keep, 1].astype(int)
             self.UnCapEidNew = self.pairs_realE2P[keep, 0].astype(int)
             self.pairs_realE2P = self.pairs_realE2P[keep]
@@ -1085,11 +1104,15 @@ class TODCMARLEnv(gym.Env):
     def _phase_check_decision(self) -> Tuple[bool, bool]:
         """碰撞/资产/全捕获与 DWA（main0319:258-264）。返回 (need_replan, terminal)。"""
         if self._check_collision():
+            print(f"[PHASE_CHECK] tick={self._tick_counter} t_all={self.t_all:.3f} → terminal: pursuer_collision")
             return False, True
         if self._check_asset_breach():
+            print(f"[PHASE_CHECK] tick={self._tick_counter} t_all={self.t_all:.3f} → terminal: asset_breached")
             return False, True
-        
+
         if self.num_E > 0 and np.all(self.Capflag_full):
+            print(f"[PHASE_CHECK] tick={self._tick_counter} t_all={self.t_all:.3f} → terminal: all_captured, "
+                  f"Capflag_full={self.Capflag_full.tolist()}")
             return False, True
         need_replan = False
         if self.enable_dwa_replan:
@@ -1098,20 +1121,6 @@ class TODCMARLEnv(gym.Env):
             # TODO:测试这个数值
             need_replan = not bool(np.all(min_dists <= 50))
         return need_replan, False
-
-    def _update_capflag_from_geometry(self) -> int:
-        """按最近追捕者更新 Capflag；返回本步新增捕获数。"""
-        distances_now = self._pairwise_dist()
-        assignments_now = np.argmin(distances_now, axis=0)
-        p_for_e_now = self.PosP
-        e_now = self.PosE
-        dx_now = e_now[:, 0] - p_for_e_now[:, 0]
-        dy_now = e_now[:, 1] - p_for_e_now[:, 1]
-        ang_pe_now = np.degrees(np.arctan2(dy_now, dx_now))
-        angle_diff_now = (ang_pe_now - np.degrees(p_for_e_now[:, 2]) + 180.0) % 360.0 - 180.0
-        cap_dist = float(self.CapRef["CapDist"])
-        cap_angle_half = float(self.CapRef["CapAngle"]) / 2.0
-        self.Capflag = (np.min(distances_now, axis=0) <= cap_dist) & (np.abs(angle_diff_now) <= cap_angle_half)
 
     def _pos_p_xyz_for_global_pid(self, pid: int) -> Tuple[float, float, float]:
         """全局 pid → 平面位置+朝向；PosP 紧凑时用 UnCapPidNew 行映射。"""
@@ -1239,6 +1248,68 @@ class TODCMARLEnv(gym.Env):
                         f"[{context}] compact pid {c_pid} >= len(PathP)={len(self.PathP)}"
                     )
 
+    def _validate_capflag_consistency(self, context: str = "") -> None:
+        """校验 Capflag_full / pairs_realE2P / UnCapEidNew / UnCapPidNew / assigned_eid_full 的一致性。
+
+        检查所有可能导致"配对莫名停止"的数据不一致问题。
+        """
+        # --- 1. Capflag_full 基本形状 ---
+        if self.Capflag_full is None:
+            return
+        if self.Capflag_full.shape != (self.num_E,):
+            raise ValueError(f"[{context}] Capflag_full shape {self.Capflag_full.shape} != ({self.num_E},)")
+
+        # --- 2. UnCapEidNew 应全部是未捕获的 ---
+        # （pairs_realE2P 不引用已捕获 evader 的检查在 _validate_pair_data_integrity 中）
+        if self.UnCapEidNew is not None and self.UnCapEidNew.size > 0:
+            for eid in self.UnCapEidNew:
+                eid = int(eid)
+                if eid < 0 or eid >= self.num_E:
+                    raise ValueError(f"[{context}] UnCapEidNew contains invalid eid={eid}")
+                if bool(self.Capflag_full[eid]):
+                    raise ValueError(
+                        f"[{context}] UnCapEidNew contains captured eid={eid}, "
+                        f"Capflag_full={self.Capflag_full.tolist()}"
+                    )
+
+        # --- 3. UnCapPidNew 对应的 evader 应全部未捕获 ---
+        if (self.pairs_realE2P is not None and self.pairs_realE2P.size > 0
+                and self.UnCapPidNew is not None and self.UnCapPidNew.size > 0):
+            pair_pids = set(int(x) for x in self.pairs_realE2P[:, 1])
+            for pid in self.UnCapPidNew:
+                if int(pid) not in pair_pids:
+                    raise ValueError(
+                        f"[{context}] UnCapPidNew contains pid={int(pid)} not in pairs_realE2P pids={pair_pids}"
+                    )
+
+        # --- 4. assigned_eid_full 与 pairs_realE2P 一致性 ---
+        if self.assigned_eid_full is not None and self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
+            for i in range(self.pairs_realE2P.shape[0]):
+                eid = int(self.pairs_realE2P[i, 0])
+                pid = int(self.pairs_realE2P[i, 1])
+                if pid < 0 or pid >= self.num_P:
+                    raise ValueError(f"[{context}] pairs_realE2P[{i}] invalid pid={pid}")
+                if self.assigned_eid_full[pid] != eid:
+                    raise ValueError(
+                        f"[{context}] assigned_eid_full[{pid}]={self.assigned_eid_full[pid]} "
+                        f"!= pairs_realE2P[{i}] eid={eid}"
+                    )
+
+        # --- 5. PosP / PosE 形状与存活集合一致（仅在 _advance_from_paths 之后检查） ---
+        # _phase_update 更新 UnCap*New 但 PosP/PosE 要等 _advance_from_paths 才同步，
+        # 所以只在 PosP/PosE 行数与 UnCap*New 不一致且 PosP/PosE 行数 > UnCap*New 时报错
+        # （缩小是正常的，说明 _advance_from_paths 尚未调用）。
+        if self.UnCapPidNew is not None and self.PosP is not None:
+            if self.PosP.shape[0] < self.UnCapPidNew.size:
+                raise ValueError(
+                    f"[{context}] PosP rows {self.PosP.shape[0]} < UnCapPidNew size {self.UnCapPidNew.size}"
+                )
+        if self.UnCapEidNew is not None and self.PosE is not None:
+            if self.PosE.shape[0] < self.UnCapEidNew.size:
+                raise ValueError(
+                    f"[{context}] PosE rows {self.PosE.shape[0]} < UnCapEidNew size {self.UnCapEidNew.size}"
+                )
+
     def _update_capflag_full_from_geometry(self) -> int:
         """更新全局捕获标记 Capflag_full（单调置 True）。返回本次新增捕获数量。"""
         if self.Capflag_full is None:
@@ -1280,6 +1351,19 @@ class TODCMARLEnv(gym.Env):
             if float(d[j]) <= cap_dist and abs(float(angle_diff)) <= cap_angle_half:
                 self.Capflag_full[eid] = True
                 newly += 1
+                cap_pid = int(alive_pids[j])
+                # 检查是否是配对的追捕者捕获了目标
+                assigned_pid = -1
+                if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
+                    match = np.where(self.pairs_realE2P[:, 0] == eid)[0]
+                    if match.size > 0:
+                        assigned_pid = int(self.pairs_realE2P[match[0], 1])
+                if assigned_pid >= 0 and cap_pid != assigned_pid:
+                    print(f"[CAPTURE] WARNING: evader {eid} captured by pursuer {cap_pid} "
+                          f"(NOT assigned pursuer {assigned_pid}), d={float(d[j]):.1f}, ang={float(angle_diff):.1f}°")
+                else:
+                    print(f"[CAPTURE] evader {eid} captured by pursuer {cap_pid}, "
+                          f"d={float(d[j]):.1f}, ang={float(angle_diff):.1f}°")
                 # invalidate assigned targets that were captured
                 if self.assigned_eid_full is not None:
                     self.assigned_eid_full = np.asarray(self.assigned_eid_full, dtype=np.int64)

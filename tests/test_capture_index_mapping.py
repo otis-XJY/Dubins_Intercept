@@ -26,7 +26,7 @@ def _setup_env_3v3(seed: int = 0):
 
 def _assert_pos_mapping_consistent(env):
     """
-    捕获后最容易错的是“紧凑 PosP/PosE 的行”与 “UnCapPidNew/UnCapEidNew 的全局 id”错位。
+    捕获后最容易错的是"紧凑 PosP/PosE 的行"与 "UnCapPidNew/UnCapEidNew 的全局 id"错位。
 
     我们用稳定的全局映射函数断言：
     - 对每个存活 pid: env._pos_p_xyz_for_global_pid(pid) 与 env.PosP[对应行] 一致
@@ -70,8 +70,7 @@ def test_phase_update_and_advance_keep_global_eid_mapping_after_capture():
     # 记录 reset 后的 PathE（按全局 eid 构造的列表），用于校验 PathEpre 的引用是否对应正确全局 eid
     pathE_global = list(env.PathE)
 
-    # 模拟”捕获 pairs 第 0 行”的过滤语义：Capflag_full 按全局 eid 标记
-    env.Capflag = np.asarray([True, False, False], dtype=bool)
+    # 模拟"捕获 pairs 第 0 行"的过滤语义：Capflag_full 按全局 eid 标记
     env.Capflag_full[int(env.pairs_realE2P[0, 0])] = True
     env._phase_update()
 
@@ -106,7 +105,6 @@ def test_capture_two_rows_keeps_uncap_sets_and_pos_mapping():
     env.UnCapEidNew = env.UnCapEid.copy()
     env.UnCapPidNew = env.UnCapPid.copy()
 
-    env.Capflag = np.asarray([True, False, True], dtype=bool)
     env.Capflag_full[int(env.pairs_realE2P[0, 0])] = True
     env.Capflag_full[int(env.pairs_realE2P[2, 0])] = True
     env._phase_update()
@@ -122,7 +120,7 @@ def test_capture_two_rows_keeps_uncap_sets_and_pos_mapping():
 
 def test_pairs_row_order_shuffled_capture_first_row_still_filters_correct_pair():
     """
-    pairs 行顺序被打乱时，Capflag[i] 仍是“与 pairs_realE2P 第 i 行对齐”的过滤语义。
+    pairs 行顺序被打乱时，Capflag[i] 仍是"与 pairs_realE2P 第 i 行对齐"的过滤语义。
     该测试确保捕获后剩余对与 UnCap*New 一致，且 _advance_from_paths 后 PosP/PosE 映射正确。
     """
     env = _setup_env_3v3(seed=2)
@@ -138,7 +136,6 @@ def test_pairs_row_order_shuffled_capture_first_row_still_filters_correct_pair()
     env.UnCapPidNew = env.UnCapPid.copy()
 
     # 捕获第 1 行（即 (0,2)），按全局 eid=0 标记 Capflag_full
-    env.Capflag = np.asarray([False, True, False], dtype=bool)
     env.Capflag_full[int(env.pairs_realE2P[1, 0])] = True
     env._phase_update()
 
@@ -155,7 +152,7 @@ def test_step_forced_single_capture_keeps_posp_pose_mapping():
     """
     更贴近真实 step()：
     - 不直接调用 _phase_update/_advance_from_paths，而是跑一次 env.step()
-    - 用 monkeypatch 的方式强制 _update_capflag_from_geometry 在 step 内只捕获一个“紧凑槽位”的敌机
+    - 用 monkeypatch 的方式强制 _update_capflag_full_from_geometry 在 step 内只捕获一个敌机
     - step 后检查：
       1) info 中 captured_delta_full == 1
       2) UnCapEidNew/UnCapPidNew 与 PosE/PosP 行数一致
@@ -165,52 +162,33 @@ def test_step_forced_single_capture_keeps_posp_pose_mapping():
     if env is None:
         return
 
-    # Ensure Capflag_full exists and starts with all False
     assert env.Capflag_full is not None
     env.Capflag_full[:] = False
 
-    # Force exactly one compact-slot capture inside step.
-    orig = env._update_capflag_from_geometry
     orig_full = env._update_capflag_full_from_geometry
     did_capture = {"done": False, "eid": None}
 
-    def _forced_single_capture():
-        n = int(env.PosE.shape[0])
-        if n <= 0:
-            env.Capflag = np.zeros((0,), dtype=bool)
-            return 0
-        cap = np.zeros((n,), dtype=bool)
-        if not did_capture["done"]:
-            cap[0] = True
-            # Remember which global eid was at compact slot 0 on the capture tick.
-            did_capture["eid"] = int(np.asarray(env.UnCapEidNew, dtype=int).ravel()[0])
-            did_capture["done"] = True
-            env.Capflag = cap
-            return 1
-        env.Capflag = cap
-        return 0
-
     def _forced_single_capture_full():
-        # Mirror the legacy compact-slot capture into stable global Capflag_full.
         if env.Capflag_full is None:
             raise RuntimeError("Capflag_full is None")
-        if did_capture["done"] is False or did_capture["eid"] is None:
-            # full should be updated on the same tick as legacy capture;
-            # if legacy has not captured yet, do nothing.
-            return 0
-        eid = int(did_capture["eid"])
-        prev = bool(env.Capflag_full[eid])
-        env.Capflag_full[eid] = True
-        return 0 if prev else 1
+        if not did_capture["done"]:
+            # 捕获 UnCapEidNew 中的第一个全局 eid
+            alive_eids = np.asarray(env.UnCapEidNew, dtype=int).ravel()
+            if alive_eids.size > 0:
+                eid = int(alive_eids[0])
+                did_capture["eid"] = eid
+                did_capture["done"] = True
+                prev = bool(env.Capflag_full[eid])
+                env.Capflag_full[eid] = True
+                return 0 if prev else 1
+        return 0
 
-    env._update_capflag_from_geometry = _forced_single_capture  # type: ignore[assignment]
     env._update_capflag_full_from_geometry = _forced_single_capture_full  # type: ignore[assignment]
 
     try:
         act = np.zeros(env.num_P, dtype=np.int64)
         _obs, _rew, _term, _trunc, info = env.step(act)
     finally:
-        env._update_capflag_from_geometry = orig  # type: ignore[assignment]
         env._update_capflag_full_from_geometry = orig_full  # type: ignore[assignment]
 
     # step 之后的 info 应该提供稳定捕获增量

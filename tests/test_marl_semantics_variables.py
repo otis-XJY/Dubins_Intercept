@@ -1,18 +1,16 @@
 """
-MARL 变量语义探测（Capflag / UnCapPid / UnCapPidNew / pairs_realE2P / captured）
+MARL 变量语义探测（Capflag_full / UnCapPid / UnCapPidNew / pairs_realE2P / captured）
 
 结论摘要（由代码路径 + 一次 reset/step 快照验证；长回合捕获需另行仿真）：
 
 1. **不存在** ``env.captured`` 或 ``self.captured`` 数组。
    - 步内新增捕获数在 ``StepStats.captured`` / ``stats.captured``；
-   - ``info[p_i][\"captured_total\"]`` = ``int(np.sum(env.Capflag))``（全为已捕获敌机数之和的计数语义）。
+   - ``info[p_i][\"captured_total\"]`` = ``int(np.sum(env.Capflag_full))``（全为已捕获敌机数之和的计数语义）。
 
-2. **Capflag**
-   - ``reset`` 时初始化为长度 **num_E** 的全 False；
-   - 每次 ``_update_capflag_from_geometry`` **整表重写**为长度 **len(PosE.shape[0])** 的布尔向量；
-   - ``PosE`` 在 ``_advance_from_paths`` 中按 ``UnCapEidNew`` 逐行采样，故 **len(Capflag) == len(UnCapEidNew)**（紧凑敌机列表长度），
-     在全员存活时等于 **num_E**；若有未捕获子集收缩，则会 **变短**（与当前 ``PosE`` 行数一致）。
-   - 语义：**当前几何步里，每个「活跃敌机槽位」是否满足距离+扇区捕获条件**（对最近追捕者），不是单独的持久 ``self.captured`` 存档。
+2. **Capflag_full**
+   - ``reset`` 时初始化为长度 **num_E** 的全 False（全局索引）；
+   - ``_update_capflag_full_from_geometry`` 中 **单调置 True**（不会从 True 变回 False）；
+   - 语义：**全局 eid 维度的捕获标记**，用于 ``_phase_update`` 过滤配对和终止判断。
 
 3. **UnCapPid / UnCapEid**
    - 初始为 ``np.arange(num_P)`` / ``np.arange(num_E)``：**全局机号 / 敌号** 的「注册表」；
@@ -22,16 +20,16 @@ MARL 变量语义探测（Capflag / UnCapPid / UnCapPidNew / pairs_realE2P / cap
 4. **UnCapPidNew / UnCapEidNew**
    - 初值与 UnCapPid/UnCapEid 相同；
    - 当 ``_phase_update`` 中门控成立时：
-     ``UnCapPidNew = pairs_realE2P[~Capflag, 1]``，``UnCapEidNew = pairs_realE2P[~Capflag, 0]``，
-     即取 **仍未被 Capflag 标为捕获** 的分配行上的 **全局 pid / eid**；
+     ``UnCapPidNew = pairs_realE2P[keep, 1]``，``UnCapEidNew = pairs_realE2P[keep, 0]``，
+     其中 ``keep = ~Capflag_full[global_eids]``，即取 **仍未被 Capflag_full 标为捕获** 的分配行上的 **全局 pid / eid**；
    - **不是**从 0 起的紧凑下标，除非碰巧全局 id 为 0..k-1。
    - ``_advance_from_paths`` 用 ``UnCapPidNew`` 列举更新 ``PosP``：**PosP 行数 == len(UnCapPidNew)**（每行对应一个当前参与推进的全局 pursuer）。
 
 5. **pairs_realE2P**
    - 每行 ``[eid, pid]``（经 Hungarian 与 UnCapEid/UnCapPid 映射后的全局 id）；
    - 与 ``IC`` 中 ``(eid_ref, pid_ref)`` 对齐；**不必对角**，例如可出现 ``[[1,0],[2,1],[0,2]]``；
-   - ``_phase_update`` 要求 ``pairs_realE2P.shape[0] == Capflag.shape[0]`` 才能用 ``~Capflag`` 行过滤，
-     故二者须 **同长**；该长度在全员存活时常为 **num_E**。
+   - ``_phase_update`` 按 ``Capflag_full[global_eid]`` 过滤 pairs_realE2P 行，
+     故 ``pairs_realE2P`` 中的 eid 必须全部是未捕获的。
 
 6. **_build_c_nodes**（obs_generator）用 ``subsets[pid]`` 与 ``pairs`` 行顺序耦合：仅当 ``pairs`` 按 **pid 列升序** 且行数等于 num_P 时与「按全局 pid 填行」一致；否则存在错行风险（见计划文档）。
 """
@@ -55,8 +53,8 @@ def test_no_self_captured_array_on_env(env):
 
 def test_after_reset_capflag_un_cap_and_pairs_shapes(env):
     obs, _ = env.reset()
-    assert env.Capflag.dtype == bool or env.Capflag.dtype == np.bool_
-    assert env.Capflag.shape[0] == env.num_E
+    assert env.Capflag_full.dtype == bool or env.Capflag_full.dtype == np.bool_
+    assert env.Capflag_full.shape[0] == env.num_E
     assert len(env.UnCapPid) == env.num_P and len(env.UnCapEid) == env.num_E
     assert np.array_equal(env.UnCapPid, np.arange(env.num_P))
     assert np.array_equal(env.UnCapEid, np.arange(env.num_E))
@@ -79,9 +77,9 @@ def test_after_reset_capflag_un_cap_and_pairs_shapes(env):
     assert env.PosP.shape[0] == env.num_P and env.PosE.shape[0] == env.num_E
 
 
-def test_capflag_length_equals_pos_e_rows_after_geometry(env):
+def test_capflag_full_length_equals_num_e_after_reset(env):
     env.reset()
-    assert env.Capflag.shape[0] == env.PosE.shape[0]
+    assert env.Capflag_full.shape[0] == env.num_E
 
 
 def test_one_step_keeps_dict_terminations_false(env):
@@ -100,11 +98,13 @@ def test_captured_total_info_equals_sum_capflag(env):
     assert total == int(np.sum(env.Capflag_full))
 
 
-def test_phase_update_gate_requires_matching_lengths(env):
-    """门控：pairs 行数与 Capflag 长度一致时才能布尔过滤 pairs。"""
+def test_phase_update_gate_uses_capflag_full(env):
+    """门控：_phase_update 按 Capflag_full[global_eid] 过滤 pairs_realE2P。"""
     env.reset()
     if env.pairs_realE2P is not None:
-        assert env.pairs_realE2P.shape[0] == env.Capflag.shape[0]
+        # pairs 中的 eid 应全部未被捕获
+        for eid in env.pairs_realE2P[:, 0]:
+            assert not bool(env.Capflag_full[int(eid)])
 
 
 def test_uncap_pid_new_values_are_global_indices(env):

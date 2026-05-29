@@ -199,7 +199,7 @@ def _live_status_pairing(env: TODCMARLEnv) -> Dict[str, object]:
                 vals.append(float(v))
         reward_mean = float(np.mean(vals)) if len(vals) > 0 else None
 
-    captured_total_full = int(np.sum(cap_full)) if cap_full is not None else int(np.sum(env.Capflag))
+    captured_total_full = int(np.sum(cap_full)) if cap_full is not None else int(np.sum(env.Capflag_full))
     alive_e = int(env.num_E - captured_total_full)
 
     return {
