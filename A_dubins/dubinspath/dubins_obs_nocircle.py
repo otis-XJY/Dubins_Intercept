@@ -8,7 +8,7 @@ from A_dubins.coreCode.SafeFlag import if_safe_point
 from A_dubins.search.update_first import update_first
 
 def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsize, pos_id, parent_id, obs_no_circle,
-                        total_field, resolution,depth,max_depth):
+                        total_field, resolution,depth,max_depth,deadline=None):
     print(f"from {parent_id} avoid {pos_id}")
 
     resolution=0.1*R
@@ -74,11 +74,12 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
 
                 print('需要插入点'+str(Insertfinal['End_Point_Cost']))
                 _,_,_,param_all_2 = A_dubins_nocircle_swarm(
-                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all, 
+                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all,
                     Stepsize, 0,
                     resolution,
                     depth=depth+1,
-                    max_depth=max_depth
+                    max_depth=max_depth,
+                    deadline=deadline
                 )
                 param_safe1=update_first(Insertfinal['param_all_1'], param_all_2)
         
@@ -105,9 +106,9 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
         # 第二次尝试：基于 negative 点集合找最小（最远的负方向）
         distance_all_negative = distances[distances < 0]
         points_negative = points[distances < 0]
-        # if distance_all_negative.size > 0:
-        _, idx_local = np.min(distance_all_negative), np.argmin(distance_all_negative)
-        farthest_point_min = points_negative[idx_local, :]
+        if distance_all_negative.size > 0:
+            _, idx_local = np.min(distance_all_negative), np.argmin(distance_all_negative)
+            farthest_point_min = points_negative[idx_local, :]
 
         center_new2, poit_num2 = obtain_new_center(a, b, c, Start_Point, R, farthest_point_min, 2, total_field, 1, resolution)
         flag_safe2 = if_safe_point(obs_no_circle, center_new2[0], r_e)
@@ -136,11 +137,12 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
 
                 print('需要插入点'+str(Insertfinal['End_Point_Cost']))
                 _,_,_,param_all_2 = A_dubins_nocircle_swarm(
-                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all, 
+                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all,
                     Stepsize, 0,
                     resolution,
                     depth=depth+1,
-                    max_depth=max_depth
+                    max_depth=max_depth,
+                    deadline=deadline
                 )
                 param_safe1=update_first(Insertfinal['param_all_1'], param_all_2)
 
@@ -166,9 +168,9 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
         # 第二次尝试：基于 positive 点集合找最小（最远的正方向）
         distance_all_positive  = distances[distances > 0]
         points_positive  = points[distances > 0]
-        # if distance_all_negative.size > 0:
-        _, idx_local = np.min(distance_all_positive), np.argmin(distance_all_positive )
-        farthest_point_max  = points_positive [idx_local, :]
+        if distance_all_positive.size > 0:
+            _, idx_local = np.min(distance_all_positive), np.argmin(distance_all_positive)
+            farthest_point_max  = points_positive [idx_local, :]
 
         center_new2, poit_num2 = obtain_new_center(a, b, c, Start_Point, R, farthest_point_max, 2, total_field, 1, resolution)
         flag_safe2 = if_safe_point(obs_no_circle, center_new2[0], r_e)
@@ -197,11 +199,12 @@ def dubins_obs_nocircle(Start_Point, End_Point, outline_all, r_s, r_e, R, Stepsi
 
                 print('需要插入点'+str(Insertfinal['End_Point_Cost']))
                 _,_,_,param_all_2 = A_dubins_nocircle_swarm(
-                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all, 
+                    Start_Point, Insertfinal['End_Point_now'], 0, 0, r_s, obs_no_circle, outline_all,
                     Stepsize, 0,
                     resolution,
                     depth=depth+1,
-                    max_depth=max_depth
+                    max_depth=max_depth,
+                    deadline=deadline
                 )
                 param_safe1=update_first(Insertfinal['param_all_1'], param_all_2)
     # 返回结果

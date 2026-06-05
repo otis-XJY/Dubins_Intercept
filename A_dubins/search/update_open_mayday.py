@@ -8,7 +8,7 @@ from A_dubins.search.check_in_open_new import check_in_open_new
 
 import numpy as np
 def update_open_mayday(Start_Point, End_Point, outline_all, r, Stepsize, obs_no_circle, total_field, close, open,
-                       open_f, pos_id_mayday, resolution,depth,max_depth):
+                       open_f, pos_id_mayday, resolution,depth,max_depth,deadline=None):
     param_all = []
     param_best = []
 
@@ -18,7 +18,7 @@ def update_open_mayday(Start_Point, End_Point, outline_all, r, Stepsize, obs_no_
         for i in range(len(obs_no_circle)):
             if obs_no_circle[i] is not None and len(obs_no_circle[i]) > 0:
                 param_all_, param_best_ = dubins_obs_nocircle(Start_Point, End_Point, outline_all, r, r, r, Stepsize, i, -1, obs_no_circle,
-                                        total_field, resolution,depth,max_depth)
+                                        total_field, resolution,depth,max_depth,deadline)
                 # param_all_ may itself be a list of columns; flatten into top-level list-of-columns
                 if isinstance(param_all_, list):
                     param_all.extend(param_all_)
@@ -48,7 +48,7 @@ def update_open_mayday(Start_Point, End_Point, outline_all, r, Stepsize, obs_no_
                 SStart_Point = np.hstack([close[-1]['point'][:, -1], close[-1]['vtheta']])
                 param_all_, param_best_ = dubins_obs_nocircle(SStart_Point, End_Point, outline_all, r, r, r,
                                         Stepsize, obs_to_avoid[i], close[-1]['pos_id'], obs_no_circle, total_field,
-                                        resolution,depth,max_depth)
+                                        resolution,depth,max_depth,deadline)
                 if isinstance(param_all_, list):
                     param_all.extend(param_all_)
                 else:

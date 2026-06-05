@@ -1,0 +1,49 @@
+# python -m main.batch_env_init --config configs/env_init.yaml
+# python -m main.batch_env_build --config configs/env_build.yaml
+# python -m main.batch_evader_paths --config configs/evader_paths.yaml
+# 并行加速：--num-workers N（0=CPU 核数）
+
+
+n_maps: 5
+out_root: ./map
+
+# 并行 worker 数（1=串行，0=CPU 核数）
+num_workers: 1
+
+# TimeMap 命名：默认建议带秒，批量更不易碰撞
+time_with_seconds: true
+time_prefix: ""
+
+# 是否在初始化阶段保存地图图片（Map.png）
+save_png: true
+png_dpi: 300
+
+# obtainMap 参数（对应 intercept/Map/obtainMap.py）
+obtain_map:
+  n_topo: 15
+  n_blank: 15
+  safety: 20.0
+
+# 地图主要参数（参考 main/mainObtainMap.py）
+map_params:
+  numTime: 50
+  r: 10
+  Stepsize: 0.01
+  sure: 20
+
+  obs_mapsize_x: [0, 2000]
+  obs_mapsize_y: [250, 2000]
+  mapsize_x: 2000
+  mapsize_y: 2000
+
+  R: [100, 120]
+  num_obs_nocircle: 3
+  num_steps: 100
+
+  # 网格分辨率（Trans_Point 生成用）
+  resolution_map_pos: [5, 5]
+
+  # 可选：覆盖设施点与追捕者起点；不提供则按 sure/m范围自动生成
+  numValue: 3
+  numUav: 3
+

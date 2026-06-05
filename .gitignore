@@ -1,21 +1,17 @@
 # --- 数据文件 ---
-*.jbl
 *.pkl
 *.npy
 *.mat
 *.csv
-*.json
 
 # --- 视频和图片 ---
 *.mp4
 *.gif
-*.png
 *.jpg
 
 # --- 缓存和运行环境 ---
 __pycache__/
 .ipynb_checkpoints/
-.vscode/
 .idea/
 venv/
 .env
@@ -25,3 +21,6 @@ data/
 output/
 temp/
 AI/
+wandb/
+.worktrees/
+worktrees/

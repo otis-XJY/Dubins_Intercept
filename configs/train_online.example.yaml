@@ -1,0 +1,48 @@
+episodes: 300
+max_episode_steps: 200
+gamma: 0.99
+value_coef: 0.5
+entropy_coef: 0.01
+lr: 0.0003
+hidden_dim: 128
+num_heads: 4
+seed: 42
+device: cuda:0
+distributed: false
+ddp_backend: nccl
+ddp_find_unused_parameters: false
+multi_gpu: true
+gpu_ids: 4,5,6
+schemes:
+  - Concatenative Query Network
+  - Gated Query Network
+  - Point-Wise Scoring Network
+time_res: 1.0
+enable_dwa_replan: true
+reward:
+  alpha_dist_v: 1.0
+  beta_delta_t: 1.0
+  gamma_delta_d: 1.0
+  gamma_delta_theta: 1.0
+  lambda_path_l: 1.0
+  w_global: 1.0
+  div_sigma: 300.0
+  assign_penalty: 5.0
+  safe_dist_min: 120.0
+  safe_penalty_scale: 0.5
+  step_cost: -0.05
+  terminal_capture_bonus: 100.0
+  terminal_asset_loss_penalty: 500.0
+  asset_breach_radius: 40.0
+  dist_progress_scale: 0.0
+wandb_project: dubins-marl-online
+wandb_entity: null
+wandb_run_name: online_multi_scheme
+wandb_mode: online
+log_interval: 1
+eval_interval: 10
+eval_episodes: 1
+save_dir: output/checkpoints
+save_best: true
+save_replay: false
+replay_dir: output/eval_traces

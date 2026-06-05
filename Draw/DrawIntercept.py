@@ -8,11 +8,13 @@ def _extract_iso_points(iso_map, agent_ids, time_ids, iso_indices):
     get_iso = np.frompyfunc(lambda agent_id, time_id: iso_map[int(agent_id)][int(time_id)].IsoPos, 2, 1)
     get_x = np.frompyfunc(lambda iso_pos, iso_idx: iso_pos[0, int(iso_idx)], 2, 1)
     get_y = np.frompyfunc(lambda iso_pos, iso_idx: iso_pos[1, int(iso_idx)], 2, 1)
+    get_vtheta = np.frompyfunc(lambda iso_pos, iso_idx: iso_pos[2, int(iso_idx)], 2, 1)
 
     iso_pos_arr = get_iso(agent_ids, time_ids)
     x = np.asarray(get_x(iso_pos_arr, iso_indices), dtype=float)
     y = np.asarray(get_y(iso_pos_arr, iso_indices), dtype=float)
-    return np.column_stack((x, y))
+    vtheta = np.asarray(get_vtheta(iso_pos_arr, iso_indices), dtype=float)
+    return np.column_stack((x, y,vtheta))
 
 
 def _extract_path_segments(path_map, row_ids, col_ids):

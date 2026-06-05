@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk -F'K=' '{print $2}')",
+      "WebFetch(domain:)",
+      "Bash(python -c \"from A_dubins.A_dubins_nocircle_swarm import A_dubins_nocircle_swarm, _PLANNER_TIMEOUT_SEC, _PLANNER_MAX_ITER, _PLANNER_MAYDAY_MAX_ITER; print\\('导入成功, timeout=', _PLANNER_TIMEOUT_SEC, 'max_iter=', _PLANNER_MAX_ITER, 'mayday_max=', _PLANNER_MAYDAY_MAX_ITER\\)\")",
+      "Bash(python -m pytest tests/test_capture_index_mapping.py::test_step_forced_single_capture_keeps_posp_pose_mapping -x -q)",
+      "Bash(python -m pytest tests/ -x -q --ignore=tests/test_capture_index_mapping.py)",
+      "Bash(python -m pytest tests/test_update_open_mayday.py -x -q)"
+    ]
+  }
+}

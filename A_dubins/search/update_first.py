@@ -6,8 +6,9 @@ def update_first(param_old, param_new):
     # 拼接旧的 param_safe 和新的 param_all
             # MATLAB 中的嵌套循环 j+i 索引意味着生成所有可能的组合
     # 检查是否存在 pos_id 字段且非空
-    if len(param_new)!=0:
-        if param_old.get('pos_id') is not None and param_new.get('pos_id') is not None:
+    if param_new is None or len(param_new)==0:
+        return param_all
+    if param_old.get('pos_id') is not None and param_new.get('pos_id') is not None:
             
             # 构造拼接后的节点字典
             node = {}

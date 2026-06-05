@@ -1,0 +1,57 @@
+# python -m main.batch_env_init --config configs/env_init.yaml
+# python -m main.batch_env_build --config configs/env_build.yaml
+# python -m main.batch_evader_paths --config configs/evader_paths.yaml
+# 并行加速：--num-workers N（0=CPU 核数，仅 replay 模式）
+
+
+map_root: ./map
+
+# 并行 worker 数（1=串行，0=CPU 核数；仅 replay 模式生效）
+num_workers: 1
+
+# 不写 time_maps 表示自动扫描 map_root 下含 Map.jbl 的 TimeMap
+# time_maps:
+#   - "0425_231424"
+
+m_profiles: 2
+time_with_seconds: true
+
+# interactive：每条 profile 启动一次网页选点并保存 mid_points
+# replay：直接读取已存在的 points 文件（此处实现为仍从 points_file_template 读取）
+mode: interactive
+
+web_picker:
+  host: 127.0.0.1
+  port: 8765
+
+# 每条 profile 的点文件名（保存在 profile 目录内）
+points_file_template: PathMidPts.json
+
+# Evader 初始状态（Nx3: x,y,theta）
+evader:
+  init:
+    - [200, 1950, -1.57079632679]
+    - [1000, 1950, -1.57079632679]
+    - [1800, 1950, -1.57079632679]
+
+# 每个 evader 对应的设施点 id（1-based），长度必须等于 evader 数量
+value_id_list: [1, 3, 2]
+
+# 随机化配置（每个 profile 独立随机化）
+randomize:
+  enabled: true  # 总开关：开启后每个 profile 都会独立随机化 value_id_list 和/或 evader 位置
+  seed: null  # 随机种子（null 表示不固定种子）
+  value_ids:
+    enabled: true  # 是否随机化 value_id_list
+    range: [1, 3]  # value_id 范围（1-based，含两端），从该范围中随机选择 evader 数量个 id（允许重复）
+  evader_pos:
+    enabled: true  # 是否随机化 evader 的 x,y 坐标（theta 保持不变）
+    x_range: [200, 1800]  # x 坐标随机范围
+    y_range: [1950, 1950]  # y 坐标随机范围
+
+# 是否保存 IsoMapE2ValIn_i_tt.jbl（仅用于可视化，MARL 训练不需要）
+save_isomap: false
+
+# 可选：覆盖 Map['Stepsize'] 用于插值
+# Stepsize: 0.01
+

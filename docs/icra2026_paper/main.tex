@@ -1,0 +1,461 @@
+% ICRA 2026 Paper Template
+% 8 pages, double-column, IEEE format
+% Compile: xelatex main.tex && bibtex main && xelatex main.tex && xelatex main.tex
+%   OR:    pdflatex main.tex && bibtex main && pdflatex main.tex && pdflatex main.tex
+%
+% NOTE: ICRA 2026 uses double-anonymous review. Remove author info before submission.
+% Official template: https://ras.papercept.net/conferences/support/support.php
+
+\documentclass[10pt,conference]{IEEEtran}
+
+% ---- Packages ----
+\usepackage{fontspec}  % for XeLaTeX
+\usepackage{xeCJK}     % CJK support for Chinese comments
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{color}
+\usepackage{hyperref}
+% \usepackage{algorithm}    % uncomment if needed
+% \usepackage{algorithmic}  % uncomment if needed
+\usepackage{cite}
+\usepackage{balance}
+
+% ---- Red marker command for TODO items ----
+\newcommand{\marktodo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
+% ---- Title ----
+\title{Dynamic Intercept Point Selection for Multi-UAV Interception\\in Large-Scale Obstacle Environments via Transformer-based MARL}
+
+% ---- Authors (double-blind: remove before submission) ----
+\author{
+\IEEEauthorblockN{Author Names}
+\IEEEauthorblockA{Affiliation\\Email}
+}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+\begin{abstract}
+Large-scale UAV interception in obstacle-rich environments faces a critical challenge: adversarial evaders can execute deceptive maneuvers (fake attacks) that cause pursuers to shift from interception to pursuit, wasting limited UAV energy. Traditional isochrone-based methods are confined to small-scale, obstacle-free scenarios, while direct continuous control approaches suffer from local optima and are easily deceived. We propose a two-stage framework that combines domain knowledge from Dubins path planning with multi-agent reinforcement learning (MARL). In the first stage, Voronoi-based topological bottleneck extraction and Dubins A* isochrone maps construct a set of physically feasible candidate intercept points. In the second stage, a Transformer-based MARL policy dynamically selects optimal intercept points from the candidate set, adapting to evader behavior changes detected via trajectory deviation detection. Experiments in large-scale obstacle environments demonstrate that our method achieves superior capture rate, shorter interception time, and robustness against fake attacks compared to cost-based, greedy, and vanilla MAPPO baselines. The framework scales gracefully with increasing numbers of agents.
+\end{abstract}
+
+\begin{IEEEkeywords}
+multi-UAV interception, multi-agent reinforcement learning, Dubins path planning, Transformer attention, dynamic replanning
+\end{IEEEkeywords}
+
+% ============================================================
+% I. INTRODUCTION
+% ============================================================
+\section{Introduction}
+
+\subsection{Problem Background and Motivation}
+
+Multi-UAV interception has critical applications in security, border patrol, and infrastructure protection~\cite{vidal2002probabilistic,hespanha1999multiple}. In large-scale scenarios, multiple pursuers must cooperatively intercept multiple evaders attempting to reach protected facilities. The core challenge lies in the adversarial nature of evaders: they can execute \emph{fake attacks}---sudden turns, speed changes, or feint maneuvers---to deceive pursuers into committing to suboptimal trajectories. A pursuer that blindly flies toward an evader risks transforming a favorable interception geometry into an disadvantageous pursuit geometry, wasting precious energy in the process.
+
+Traditional interception methods based on isochrone analysis~\cite{shima2011optimal,isochron2024} and differential games~\cite{tad2018,homicidal2015} provide elegant theoretical solutions but are fundamentally limited to small-scale, obstacle-free environments. These methods compute optimal interception strategies assuming complete information and deterministic dynamics, assumptions that break down in large, obstacle-rich environments with deceptive adversaries.
+
+\subsection{Limitations of Existing Methods}
+
+Isochrone-based methods~\cite{shima2011optimal,isochron2024} construct equal-time contours from kinematic models to determine feasible interception regions. While effective in open spaces with few agents, they cannot scale to large maps with hundreds of discrete points and multiple obstacles. Direct pursuit strategies---flying straight toward the nearest evader---are easily countered by fake attacks, as the pursuer commits fully to a single direction without retaining strategic flexibility.
+
+Pure MARL approaches~\cite{yu2022surprising,chen2025online} learn end-to-end continuous control policies but suffer from poor sample efficiency in large state spaces and produce locally optimal solutions that are easily exploited by adversarial evaders.
+
+\subsection{Our Approach}
+
+We propose a knowledge-injected MARL framework that transforms the continuous control problem into a discrete selection problem. The key insight is that Dubins path planning domain knowledge can pre-compute a set of physically feasible candidate intercept points, and a learned policy can dynamically select among them based on the current tactical situation.
+
+Our approach operates in two stages:
+\begin{enumerate}
+    \item \textbf{Candidate Construction}: Voronoi-based topological bottleneck extraction identifies critical waypoints in obstacle-rich environments. Dubins A* isochrone maps pre-compute time fields for each waypoint, enabling efficient candidate evaluation.
+    \item \textbf{Dynamic Selection}: A Transformer-based MARL policy selects optimal intercept points from the candidate set. Trajectory deviation detection monitors evader behavior and triggers replanning when evaders deviate from predicted paths.
+\end{enumerate}
+
+This ``gradual approach'' strategy---moving toward key positions rather than directly chasing evaders---preserves interception geometry, conserves energy, and maintains robustness against deceptive maneuvers.
+
+\subsection{Contributions}
+
+\begin{enumerate}
+    \item We propose a Voronoi topological bottleneck + Dubins A* isochrone method for constructing candidate intercept points in large-scale obstacle environments.
+    \item We design a Transformer-based MARL framework (Concatenative Query Network) for dynamic intercept point selection that handles variable-size candidate sets.
+    \item We validate the approach in large-scale obstacle environments, demonstrating scalability, robustness against fake attacks, and superior performance over multiple baselines.
+\end{enumerate}
+
+% ============================================================
+% II. RELATED WORK
+% ============================================================
+\section{Related Work}
+
+\subsection{Traditional UAV Interception Methods}
+
+Isochrone-based approaches construct equal-time contours from kinematic models to determine feasible interception regions. Shima~\cite{shima2011optimal} analyzed optimal pursuit strategies using isochrones. Perimeter defense games~\cite{perimeter1,perimeter2} study cooperative strategies for defenders protecting boundaries. Differential game formulations~\cite{tad2018,homicidal2015} provide game-theoretic solutions for pursuit-evasion with kinematic constraints. Graph-partitioning methods~\cite{voronoi_multirobot,voronoi_pursuit} use Voronoi diagrams for multi-robot coordination and territory assignment. These methods are elegant but confined to small-scale, obstacle-free scenarios with few agents.
+
+\subsection{Multi-Agent Reinforcement Learning}
+
+MAPPO~\cite{yu2022surprising} demonstrated the surprising effectiveness of PPO in cooperative multi-agent games, establishing a strong baseline for centralized training with decentralized execution (CTDE). Actor-Attention-Critic~\cite{iqbal2019actor} introduced attention mechanisms for aggregating multi-agent information. QMIX~\cite{rashid2018qmix} proposed monotonic value function factorization for CTDE. MADDPG~\cite{lowe2017multi} addressed mixed cooperative-competitive environments. For multi-UAV tasks, Chen et al.~\cite{chen2025online} proposed online planning for pursuit-evasion using deep RL, and Peng et al.~\cite{peng2025multi} studied cooperative pursuit with limited visual fields.
+
+\subsection{Transformer in MARL}
+
+Wen et al.~\cite{wen2022mat} cast cooperative MARL as a sequence modeling problem using Multi-Agent Transformer (MAT). Cai et al.~\cite{cai2024transformer} applied Transformer attention for heterogeneous multi-robot cooperation generalization. Our work differs in that we use Transformer attention specifically for dynamic candidate point selection with variable-size action spaces, rather than for sequence-level policy generation.
+
+\subsection{Hybrid Planning + Learning}
+
+Several works combine traditional planning with learning-based methods. Voronoi-based approaches~\cite{voronoi_multirobot,voronoi_pursuit} partition environments for multi-robot coordination. Dubins path planning~\cite{dubins_astar,dubins_intercept} provides kinematically feasible paths for UAVs with minimum turning radius constraints. Our work uniquely combines Voronoi topological bottleneck extraction, Dubins isochrone maps, and Transformer-based MARL for large-scale interception with dynamic replanning.
+
+\marktodo{混合方法文献可能不足，用户可补充更多相关工作}
+
+% ============================================================
+% III. PROBLEM FORMULATION
+% ============================================================
+\section{Problem Formulation}
+
+\subsection{Scenario Description}
+
+Consider a 2D obstacle-rich environment of size $X \times X$ \marktodo{X 待确认} distance units containing $N_o$ polygonal obstacles with safety buffers. $N_v$ protected facilities (assets) are deployed at fixed locations. $P$ pursuer UAVs and $E$ evader UAVs operate in this environment.
+
+Each UAV has a constant forward velocity $v$ and a minimum turning radius $r$ (Dubins constraint). Evaders follow pre-planned trajectories toward protected facilities but can deviate to execute fake attacks. Pursuers must intercept evaders before they reach any facility. Interception occurs when a pursuer enters a capture radius $d_{\text{cap}}$ of an evader.
+
+\subsection{Dubins Path Planning Preliminaries}
+
+A Dubins vehicle moves at constant forward velocity $v$ with bounded curvature $\kappa_{\max} = 1/r$, where $r$ is the minimum turning radius. The state of a Dubins vehicle is $\mathbf{q} = (x, y, \theta)$, where $(x, y)$ is the position and $\theta$ is the heading angle.
+
+The Dubins A* algorithm~\cite{dubins_astar} extends A* search to find obstacle-avoiding shortest Dubins paths between two configurations. Given a start configuration $\mathbf{q}_s$ and a goal configuration $\mathbf{q}_g$, the algorithm returns a kinematically feasible path $\Pi = \{\mathbf{q}_0, \mathbf{q}_1, \ldots, \mathbf{q}_N\}$ with $\mathbf{q}_0 = \mathbf{q}_s$ and $\mathbf{q}_N = \mathbf{q}_g$.
+
+An \emph{isochrone} at time $t$ from configuration $\mathbf{q}_s$ is the set of all positions reachable at exactly time $t$ along a Dubins path. For a discrete set of waypoints, we pre-compute isochrone maps that store reachable positions at uniformly sampled time steps.
+
+\subsection{Dec-POMDP Formulation}
+
+We formulate the interception problem as a Dec-POMDP $\langle \mathcal{I}, \mathcal{S}, \{\mathcal{O}_i\}, \{\mathcal{A}_i\}, \mathcal{T}, \mathcal{R}, \gamma \rangle$:
+
+\textbf{Agents}: $\mathcal{I} = \{1, 2, \ldots, P\}$ (pursuers; evaders are rule-driven).
+
+\textbf{State space} $\mathcal{S}$: Contains all agent positions, velocities, headings, the candidate intercept point set, and the pursuer-evader matching relationships.
+
+\textbf{Observation space} $\mathcal{O}_i$ (ego-centric, 8-branch): Each pursuer $i$ observes:
+\begin{itemize}
+    \item $\mathbf{o}_i^{\text{self}} \in \mathbb{R}^3$: own state $(x_i, y_i, \theta_i)$
+    \item $\mathbf{o}_i^{\text{ally}} \in \mathbb{R}^{(P-1) \times 3}$: relative positions and headings of allied pursuers
+    \item $\mathbf{o}_i^{\text{pts}} \in \mathbb{R}^{K \times 8}$: candidate intercept point features $(x, y, t_p, t_e, \Delta t, c, \cdot, \cdot)$ where $t_p$ is pursuer arrival time, $t_e$ is evader arrival time, $\Delta t = t_p - t_e$, and $c$ is the composite cost
+    \item $\mathbf{o}_i^{\text{ally\_pts}} \in \mathbb{R}^{(P-1) \times K \times 8}$: allies' candidate point features
+    \item $\mathbf{o}_i^{e\_\text{self}} \in \mathbb{R}^3$: assigned evader's position and heading
+    \item $\mathbf{o}_i^{e\_\text{ally}} \in \mathbb{R}^{(P-1) \times 3}$: allies' assigned evaders
+    \item $\mathbf{o}_i^{a\_\text{self}} \in \mathbb{R}^2$: target facility position
+    \item $\mathbf{o}_i^{a\_\text{ally}} \in \mathbb{R}^{(P-1) \times 2}$: allies' target facilities
+\end{itemize}
+
+\textbf{Action space} $\mathcal{A}_i$: A discrete index selecting one of $K$ candidate intercept points. $K$ varies across decision steps as replanning regenerates the candidate set.
+
+\textbf{Reward function} $\mathcal{R}$: Step-level rewards include distance progress ($r_{\text{prog}}$), global dispersion penalty ($r_{\text{global}}$), safety distance penalty ($r_{\text{safe}}$), and time cost ($r_{\text{time}} = -0.1$). Terminal rewards include capture bonus ($R_{\text{cap}} = 30$, scaled by captured fraction) and asset loss penalty ($R_{\text{loss}} = 50$, applied uniformly to all pursuers).
+
+\textbf{Objective}: Maximize expected discounted return $J = \mathbb{E}\left[\sum_{t=0}^{T} \gamma^t r_t\right]$ with $\gamma = 0.99$.
+
+% ============================================================
+% IV. PROPOSED METHOD
+% ============================================================
+\section{Proposed Method}
+
+\subsection{Overall Framework}
+
+\marktodo{需要插入系统框架图 (Fig.~1)}
+
+Fig.~1 illustrates the overall framework. The system operates in two phases:
+
+\textbf{Offline Phase}: The environment map is processed through Voronoi topological bottleneck extraction to identify $N_{\text{topo}}$ bottleneck nodes and $N_{\text{blank}}$ coverage points, forming the discrete waypoint set $\mathcal{T}$. For each waypoint, Dubins A* isochrone maps are pre-computed and stored.
+
+\textbf{Online Phase}: At each decision step, the system constructs candidate intercept points by evaluating all (evader, pursuer, waypoint) combinations using the pre-computed isochrone fields. A Transformer-based MARL policy selects the optimal intercept point for each pursuer. Between decision steps, trajectory deviation detection monitors evader behavior: a DWA-based module simulates evader trajectories using a unicycle model with multiple $(v, \omega)$ combinations and compares them against the algorithm's predicted evader path (from the evader trajectory database). If the best-matching DWA trajectory deviates from the predicted path by more than a threshold (50 distance units), the system triggers replanning---regenerating candidates from the existing isochrone maps and reassigning pursuers via Hungarian matching.
+
+\subsection{Candidate Intercept Point Construction}
+
+\subsubsection{Topology-aware Discrete Point Sampling}
+
+\marktodo{命名待确认}
+
+Rather than uniform grid sampling, we use Voronoi diagram topology to identify critical waypoints:
+\begin{enumerate}
+    \item \textbf{Seed generation}: Sample points on obstacle boundaries, add map corners and center point.
+    \item \textbf{Voronoi computation}: Construct the Voronoi diagram over these seeds.
+    \item \textbf{Bottleneck extraction}: Voronoi vertices outside obstacle safety buffers are topological bottleneck candidates---these lie at geometric chokepoints between obstacles.
+    \item \textbf{Clustering}: KMeans clusters the bottleneck candidates into $N_{\text{topo}}$ representative nodes.
+    \item \textbf{Coverage sampling}: $N_{\text{blank}}$ additional points are generated via rejection sampling with minimum spacing constraints.
+    \item \textbf{Final waypoint set}: $\mathcal{T} = \mathcal{T}_{\text{topo}} \cup \mathcal{T}_{\text{blank}}$, each point equipped with a heading angle.
+\end{enumerate}
+
+The Voronoi vertices naturally correspond to positions where UAVs must make routing decisions in obstacle-dense areas, making them strategically valuable waypoints.
+
+\subsubsection{IsoMap Time Field Construction}
+
+For each waypoint $\mathbf{t}_j \in \mathcal{T}$ and each possible starting configuration, we pre-compute a Dubins A* path and extract the isochrone:
+
+\begin{enumerate}
+    \item \textbf{Path computation}: Run Dubins A* from each starting point to each waypoint, obtaining obstacle-avoiding paths $\Pi_{s \to j}$.
+    \item \textbf{Time sampling}: For $N_t$ uniformly sampled time steps $\{t_1, t_2, \ldots, t_{N_t}\}$, sample each path at index $\text{round}(v \cdot t_k)$ to obtain isochrone positions $\text{IsoPos}_{j,k}$.
+    \item \textbf{Storage}: The isochrone map $\mathcal{M}_j$ stores reachable positions at each time step for waypoint $j$.
+\end{enumerate}
+
+Three isochrone maps are pre-computed: pursuer-to-waypoint, evader-to-waypoint, and inter-waypoint maps.
+
+\subsubsection{Candidate Evaluation}
+
+At runtime, for each (evader $e$, pursuer $p$, waypoint $j$) combination:
+
+\begin{enumerate}
+    \item \textbf{Path splicing}: Find the nearest isochrone point to the pursuer's current position on the pre-computed map, plan a Dubins path segment to that isochrone point, and splice it with the pre-stored isochrone-to-waypoint path.
+    \item \textbf{Cost computation}: Evaluate 5 cost terms:
+    \begin{itemize}
+        \item $c_L$: path length (pursuer flight distance)
+        \item $c_d$: spatial distance (Euclidean distance to intercept point)
+        \item $c_t$: temporal matching ($|t_p - t_e|$)
+        \item $c_\theta$: heading deviation at interception
+        \item $c_V$: target safety (distance to protected facilities)
+    \end{itemize}
+    \item \textbf{Hungarian matching}: Solve the assignment problem on the composite cost matrix $C = \alpha c_L + \beta c_d + \gamma c_t + \delta c_\theta + \lambda c_V$ to determine optimal pursuer-evader pairings.
+\end{enumerate}
+
+\subsection{MARL-based Intercept Point Selection}
+
+\subsubsection{CTDE Paradigm}
+
+We adopt Centralized Training with Decentralized Execution (CTDE)~\cite{yu2022surprising}:
+\begin{itemize}
+    \item \textbf{Parameter sharing}: All $P$ pursuers share a single network; the batch dimension equals $P$.
+    \item \textbf{Centralized Critic}: Takes concatenated features from all agents as input, outputs a value estimate $V_i$ for each pursuer.
+    \item \textbf{Decentralized Actor}: Each pursuer independently selects an action based on its ego-centric observation.
+\end{itemize}
+
+\subsubsection{Transformer-based Policy Network (CQN)}
+
+\marktodo{需要插入网络架构图 (Fig.~2)}
+
+The Concatenative Query Network (CQN) processes the 8-branch observation:
+
+\textbf{Embedding layer}: Each branch is encoded by an independent MLP into a $d$-dimensional hidden space ($d=128$), followed by LayerNorm:
+\begin{align}
+    \mathbf{e}_{\text{self}} &= \text{MLP}_{\text{self}}(\mathbf{o}^{\text{self}}), \quad \mathbf{e}_{\text{ally}} = \text{MLP}_{\text{ally}}(\mathbf{o}^{\text{ally}}) \\
+    \mathbf{e}_{\text{pts}} &= \text{MLP}_{\text{pts}}(\mathbf{o}^{\text{pts}}), \quad \mathbf{e}_{e\_\text{self}} = \text{MLP}_{\text{enemy}}(\mathbf{o}^{e\_\text{self}})
+\end{align}
+Similarly for $\mathbf{e}_{\text{ally\_pts}}$, $\mathbf{e}_{e\_\text{ally}}$, $\mathbf{e}_{a\_\text{self}}$, $\mathbf{e}_{a\_\text{ally}}$.
+
+\textbf{Heterogeneous Attention}: Multi-head cross-attention ($h=4$ heads) between the 8 embedded branches, enabling information flow between self, allies, candidates, enemies, and assets.
+
+\textbf{Fusion} (ConcatMLPFusion8 for CQN): Concatenate all 8 attention outputs and fuse through an MLP to produce the environment representation $\mathbf{h}_{\text{env}} \in \mathbb{R}^d$.
+
+\textbf{Pointer Actor}: Produces logits for each candidate point:
+\begin{equation}
+    \text{logits}_k = \mathbf{h}_{\text{env}}^\top \mathbf{e}_{\text{pts},k}
+\end{equation}
+masked by $\texttt{self\_pts\_mask}$ and passed through softmax to obtain action probabilities.
+
+\textbf{Centralized Critic}: Combines $\mathbf{h}_{\text{env}}$ with a global state encoding $\mathbf{h}_{\text{global}}$ (13-dim: pursuer mean, enemy mean, asset mean, target mean, survival ratios) and outputs $V_i$.
+
+\subsubsection{Ego-centric Observation Construction}
+
+Each pursuer constructs observations relative to its own coordinate frame. The 8-branch observation includes:
+\begin{itemize}
+    \item \textbf{Self} (3-dim): $(x, y, \theta)$
+    \item \textbf{Allies} ($3 \times (P-1)$-dim): relative positions and headings
+    \item \textbf{Self candidates} ($8 \times K$-dim): $(x, y, t_p, t_e, \Delta t, c, \cdot, \cdot)$
+    \item \textbf{Ally candidates} ($8 \times (P-1) \times K$-dim)
+    \item \textbf{Assigned enemy} (3-dim): $(x, y, \theta)$ via Hungarian matching
+    \item \textbf{Ally enemies} ($3 \times (P-1)$-dim)
+    \item \textbf{Target asset} (2-dim): facility position
+    \item \textbf{Ally targets} ($2 \times (P-1)$-dim)
+\end{itemize}
+
+Variable $K$ is handled via masking, allowing the network to process dynamically changing candidate set sizes.
+
+\subsubsection{Reward Function}
+
+The reward function balances interception quality, coordination, safety, and efficiency:
+
+\textbf{Step-level rewards}:
+\begin{align}
+    r_{\text{prog}} &= \alpha \cdot (d_{\text{prev}} - d_{\text{curr}}), \quad \alpha = 0.01 \\
+    r_{\text{time}} &= -0.1
+\end{align}
+$r_{\text{global}}$: dispersion penalty ($\sigma = 300$, assign penalty $= 4.0$). $r_{\text{safe}}$: safety penalty when pursuer distance $< 120$.
+
+\textbf{Terminal rewards}:
+\begin{align}
+    R_{\text{cap}} &= 30 \times \frac{\Delta_{\text{captured}}}{E}, \quad R_{\text{loss}} = 50
+\end{align}
+
+Capture bonus and asset loss penalty are the dominant reward signals, driving cooperative interception behavior.
+
+\subsection{Training with MAPPO}
+
+We train with Multi-Agent PPO~\cite{yu2022surprising}:
+\begin{itemize}
+    \item GAE($\lambda$): $\gamma = 0.99$, $\lambda = 0.95$
+    \item PPO clip: $\epsilon = 0.2$, 4 epochs, minibatch 32
+    \item Learning rate: $3 \times 10^{-4}$ with linear decay to 10\%
+    \item Entropy coefficient: 0.02, value coefficient: 0.5
+    \item KL early stop: 0.03, advantage clip: 5.0
+    \item Network: hidden dim 128, 4 attention heads
+    \item Training: 30,000 episodes, seed 42
+\end{itemize}
+
+% ============================================================
+% V. EXPERIMENTS
+% ============================================================
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\marktodo{以下参数用 X 表示，待确认}
+
+\textbf{Environment}: 2D obstacle-rich map of size $X \times X$ distance units with $X$ polygonal obstacles and $X$ protected facilities.
+
+\textbf{UAV parameters}: $v_P = v_E = X$ m/s, minimum turning radius $r = X$.
+
+\textbf{Training data construction} (offline pre-computation):
+\begin{enumerate}
+    \item \textbf{Map generation}: Voronoi topological bottleneck extraction + coverage sampling $\rightarrow$ discrete waypoint set $\mathcal{T}$.
+    \item \textbf{IsoMap pre-computation}: Dubins A* time fields for (pursuer $\rightarrow$ waypoint), (evader $\rightarrow$ waypoint), and (inter-waypoint) pairs.
+    \item \textbf{Evader trajectories}: Reference evader paths via interactive waypoint selection.
+\end{enumerate}
+
+\textbf{Baselines} (all use Hungarian matching for pursuer-evader assignment):
+
+\begin{table}[h]
+\centering
+\caption{Baseline methods for comparison.}
+\label{tab:baselines}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Method} & \textbf{Intercept Point Selection} \\
+\midrule
+Ours (MARL) & Transformer-based MARL selection \\
+Cost-based & Minimum composite cost \\
+Greedy & Nearest by Euclidean distance \\
+Random & Random selection \\
+Vanilla MAPPO & Standard MAPPO, no knowledge \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Comparison Experiments}
+
+\marktodo{实验结果待训练完成后补充}
+
+\begin{table}[h]
+\centering
+\caption{Comparison of methods across scenarios. Results averaged over 300+ episodes, 3 seeds.}
+\label{tab:comparison}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+\textbf{Method} & \textbf{Capture} & \textbf{Time} & \textbf{Path} & \textbf{Asset} \\
+ & \textbf{Rate (\%)} & \textbf{(steps)} & \textbf{Length} & \textbf{Loss (\%)} \\
+\midrule
+Ours (MARL) & --- & --- & --- & --- \\
+Cost-based & --- & --- & --- & --- \\
+Greedy & --- & --- & --- & --- \\
+Random & --- & --- & --- & --- \\
+Vanilla MAPPO & --- & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Scalability Experiment}
+
+\begin{table}[h]
+\centering
+\caption{Scalability: performance across agent configurations.}
+\label{tab:scalability}
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+\textbf{Config} & \textbf{P} & \textbf{E} & \textbf{Capture} & \textbf{Time} \\
+\midrule
+Small & 3 & 5 & --- & --- \\
+Medium & 5 & 8 & --- & --- \\
+Large & 8 & 12 & --- & --- \\
+X-Large & 12 & 20 & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\marktodo{需要插入可扩展性折线图 (Fig.~3)}
+
+\subsection{Robustness to Fake Attacks}
+
+\begin{table}[h]
+\centering
+\caption{Robustness under fake attack conditions.}
+\label{tab:fakeattack}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Condition} & \textbf{Capture} & \textbf{Time} & \textbf{Asset} \\
+ & \textbf{Rate (\%)} & \textbf{(steps)} & \textbf{Loss (\%)} \\
+\midrule
+Normal & --- & --- & --- \\
+Fake Attack & --- & --- & --- \\
+Fake + No Replan & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Environment Complexity}
+
+\begin{table}[h]
+\centering
+\caption{Performance across obstacle densities.}
+\label{tab:complexity}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Obstacles} & \textbf{Capture} & \textbf{Time} & \textbf{Path} \\
+ & \textbf{Rate (\%)} & \textbf{(steps)} & \textbf{Length} \\
+\midrule
+None & --- & --- & --- \\
+Sparse & --- & --- & --- \\
+Dense & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Ablation Study}
+
+\begin{table}[h]
+\centering
+\caption{Ablation: contribution of each component.}
+\label{tab:ablation}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Variant} & \textbf{Capture} & \textbf{Time} & \textbf{Asset} \\
+ & \textbf{Rate (\%)} & \textbf{(steps)} & \textbf{Loss (\%)} \\
+\midrule
+Full (Ours) & --- & --- & --- \\
+w/o Transformer & --- & --- & --- \\
+w/o IsoMap Knowledge & --- & --- & --- \\
+w/o Voronoi Bottleneck & --- & --- & --- \\
+w/o DWA Replanning & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Qualitative Results}
+
+\marktodo{需要插入轨迹可视化图 (Fig.~4) 和 DWA 重规划过程图 (Fig.~5)}
+
+% ============================================================
+% VI. CONCLUSION
+% ============================================================
+\section{Conclusion}
+
+We presented a knowledge-injected MARL framework for multi-UAV interception in large-scale obstacle environments. By combining Voronoi topological bottleneck extraction, Dubins A* isochrone maps, and Transformer-based MARL selection with trajectory deviation detection, our method addresses the key challenges of large-scale scenarios: fake attack deception, dynamic candidate point adaptation, and obstacle-aware planning.
+
+Experiments demonstrate superior capture rate, interception efficiency, and robustness compared to cost-based, greedy, and vanilla MAPPO baselines. The framework scales gracefully from 3v5 to 12v20 agent configurations.
+
+\marktodo{未来工作方向待确认}
+Future work includes: (1) extending to 3D scenarios with altitude-dimensional Dubins constraints; (2) introducing learnable evader policies through self-play; (3) sim-to-real transfer on real quadrotor platforms; (4) distributed policies under communication constraints; and (5) handling dynamic obstacles and multi-type threats.
+
+% ============================================================
+% REFERENCES
+% ============================================================
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

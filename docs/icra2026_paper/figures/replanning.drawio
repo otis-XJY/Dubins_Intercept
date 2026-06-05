@@ -1,0 +1,238 @@
+<mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="500" math="0" shadow="0">
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+
+    <mxCell id="title" value="&lt;b style=&quot;font-size:15px&quot;&gt;DWA-based Trajectory Deviation Detection and Dynamic Replanning&lt;/b&gt;" style="text;html=1;align=center;fontSize=14;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="250" y="5" width="500" height="25" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p1_box" value="" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#F9F9F9;strokeColor=#CCCCCC;strokeWidth=1;" vertex="1" parent="1">
+      <mxGeometry x="20" y="40" width="230" height="380" as="geometry"/>
+    </mxCell>
+    <mxCell id="p1_label" value="&lt;b&gt;Panel 1: Initial Plan&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#666&quot;&gt;t = t₀&lt;/font&gt;" style="text;html=1;align=center;fontSize=12;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="50" y="50" width="170" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p1_pursuer" value="&lt;b&gt;P&lt;/b&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontColor=#1a3a6b;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="60" y="200" width="35" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="p1_evader" value="&lt;b&gt;E&lt;/b&gt;" style="shape=triangle;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontColor=#6b1a1a;fontFamily=Helvetica;rotation=180;" vertex="1" parent="1">
+      <mxGeometry x="180" y="200" width="35" height="35" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p1_pred_path" value="" style="endArrow=none;html=1;strokeWidth=2;strokeColor=#b85450;dashed=1;dashPattern=6 3;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="197" y="230" as="sourcePoint"/>
+        <mxPoint x="120" y="280" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="p1_pred_label" value="&lt;font style=&quot;font-size:8px;color:#b85450&quot;&gt;Predicted&lt;br&gt;Evader Path&lt;/font&gt;" style="text;html=1;align=left;fontSize=8;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="140" y="245" width="70" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p1_plan_path" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#6c8ebf;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="77" y="220" as="sourcePoint"/>
+        <mxPoint x="197" y="220" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="p1_plan_label" value="&lt;font style=&quot;font-size:8px;color:#6c8ebf&quot;&gt;Pursuer&lt;br&gt;Intercept Path&lt;/font&gt;" style="text;html=1;align=center;fontSize=8;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="100" y="175" width="80" height="25" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p1_ip" value="&lt;font style=&quot;font-size:8px&quot;&gt;IP&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#6c8ebf;strokeColor=#6c8ebf;fontSize=8;fontColor=#ffffff;" vertex="1" parent="1">
+      <mxGeometry x="190" y="214" width="20" height="20" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p1_asset" value="&lt;font style=&quot;font-size:9px&quot;&gt;★&lt;/font&gt;" style="text;html=1;align=center;fontSize=12;fontFamily=Helvetica;fontColor=#82b366;" vertex="1" parent="1">
+      <mxGeometry x="110" y="310" width="20" height="20" as="geometry"/>
+    </mxCell>
+    <mxCell id="p1_asset_label" value="&lt;font style=&quot;font-size:8px;color:#82b366&quot;&gt;Facility&lt;/font&gt;" style="text;html=1;fontSize=8;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="100" y="330" width="40" height="15" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p2_box" value="" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#F9F9F9;strokeColor=#CCCCCC;strokeWidth=1;" vertex="1" parent="1">
+      <mxGeometry x="270" y="40" width="230" height="380" as="geometry"/>
+    </mxCell>
+    <mxCell id="p2_label" value="&lt;b&gt;Panel 2: DWA Monitoring&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#666&quot;&gt;t = t₁&lt;/font&gt;" style="text;html=1;align=center;fontSize=12;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="300" y="50" width="170" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p2_pursuer" value="&lt;b&gt;P&lt;/b&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontColor=#1a3a6b;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="120" y="200" width="35" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="p2_evader" value="&lt;b&gt;E&lt;/b&gt;" style="shape=triangle;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontColor=#6b1a1a;fontFamily=Helvetica;rotation=180;" vertex="1" parent="1">
+      <mxGeometry x="380" y="170" width="35" height="35" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p2_pred_path" value="" style="endArrow=none;html=1;strokeWidth=1.5;strokeColor=#b85450;dashed=1;dashPattern=6 3;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="397" y="200" as="sourcePoint"/>
+        <mxPoint x="320" y="280" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="p2_dwa1" value="" style="endArrow=none;html=1;strokeWidth=1;strokeColor=#CCCCCC;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="397" y="195" as="sourcePoint"/>
+        <mxPoint x="440" y="250" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="p2_dwa2" value="" style="endArrow=none;html=1;strokeWidth=1;strokeColor=#CCCCCC;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="397" y="195" as="sourcePoint"/>
+        <mxPoint x="460" y="220" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="p2_dwa3" value="" style="endArrow=none;html=1;strokeWidth=1;strokeColor=#CCCCCC;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="397" y="195" as="sourcePoint"/>
+        <mxPoint x="450" y="180" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="p2_dwa4" value="" style="endArrow=none;html=1;strokeWidth=1;strokeColor=#CCCCCC;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="397" y="195" as="sourcePoint"/>
+        <mxPoint x="430" y="160" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="p2_best_match" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#d6b656;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="397" y="195" as="sourcePoint"/>
+        <mxPoint x="460" y="240" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="p2_best_label" value="&lt;font style=&quot;font-size:8px;color:#d6b656&quot;&gt;Best DWA&lt;br&gt;Match&lt;/font&gt;" style="text;html=1;align=left;fontSize=8;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="445" y="220" width="50" height="25" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p2_dev_arrow" value="&lt;font style=&quot;font-size:9px;color:#d6b656&quot;&gt;&lt;b&gt;Deviation&lt;/b&gt;&lt;/font&gt;" style="endArrow=block;endFill=1;html=1;strokeWidth=1.5;strokeColor=#d6b656;dashed=1;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="430" y="265" as="sourcePoint"/>
+        <mxPoint x="350" y="280" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="p2_label2" value="&lt;font style=&quot;font-size:8px;color:#999&quot;&gt;Multiple (v,ω)&lt;br&gt;simulations&lt;/font&gt;" style="text;html=1;align=center;fontSize=8;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="440" y="150" width="65" height="25" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p3_box" value="" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF5F5;strokeColor=#b85450;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="520" y="40" width="230" height="380" as="geometry"/>
+    </mxCell>
+    <mxCell id="p3_label" value="&lt;b&gt;Panel 3: Deviation Detected&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#666&quot;&gt;t = t₂&lt;/font&gt;" style="text;html=1;align=center;fontSize=12;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="550" y="50" width="170" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p3_pursuer" value="&lt;b&gt;P&lt;/b&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontColor=#1a3a6b;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="365" y="180" width="35" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="p3_evader" value="&lt;b&gt;E&lt;/b&gt;" style="shape=triangle;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontColor=#6b1a1a;fontFamily=Helvetica;rotation=180;" vertex="1" parent="1">
+      <mxGeometry x="640" y="140" width="35" height="35" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p3_warn" value="&lt;b style=&quot;font-size:20px;color:#b85450&quot;&gt;!&lt;/b&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;fontSize=20;" vertex="1" parent="1">
+      <mxGeometry x="600" y="100" width="40" height="40" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p3_measure" value="&lt;b&gt;Deviation Measurement&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot;&gt;DWA best path vs predicted path&lt;br&gt;Distance &amp;gt; Threshold&lt;/font&gt;" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="555" y="220" width="170" height="55" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p3_threshold" value="&lt;b style=&quot;font-size:12px;color:#b85450&quot;&gt;deviation &amp;gt; 50 → Replan Triggered&lt;/b&gt;" style="text;html=1;align=center;fontSize=11;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="540" y="300" width="200" height="25" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p3_replan_signal" value="&lt;b&gt;REPLAN&lt;/b&gt;" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#b85450;strokeColor=#b85450;fontSize=12;fontFamily=Helvetica;fontColor=#ffffff;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="610" y="340" width="80" height="35" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="arr_p3m" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#b85450;" edge="1" source="p3_measure" target="p3_threshold" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="arr_p3r" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#b85450;" edge="1" source="p3_threshold" target="p3_replan_signal" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p4_box" value="" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#F5FFF5;strokeColor=#82b366;strokeWidth=2;" vertex="1" parent="1">
+      <mxGeometry x="770" y="40" width="230" height="380" as="geometry"/>
+    </mxCell>
+    <mxCell id="p4_label" value="&lt;b&gt;Panel 4: New Plan&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;color:#666&quot;&gt;t = t₃&lt;/font&gt;" style="text;html=1;align=center;fontSize=12;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="800" y="50" width="170" height="30" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p4_pursuer" value="&lt;b&gt;P&lt;/b&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;fontColor=#1a3a6b;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="620" y="180" width="35" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="p4_evader" value="&lt;b&gt;E&lt;/b&gt;" style="shape=triangle;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;fontColor=#6b1a1a;fontFamily=Helvetica;rotation=180;" vertex="1" parent="1">
+      <mxGeometry x="900" y="140" width="35" height="35" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p4_new_cands" value="&lt;font style=&quot;font-size:8px&quot;&gt;•&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#6c8ebf;strokeColor=#6c8ebf;fontSize=8;" vertex="1" parent="1">
+      <mxGeometry x="850" y="180" width="12" height="12" as="geometry"/>
+    </mxCell>
+    <mxCell id="p4_new_cands2" value="&lt;font style=&quot;font-size:8px&quot;&gt;•&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#6c8ebf;strokeColor=#6c8ebf;fontSize=8;" vertex="1" parent="1">
+      <mxGeometry x="870" y="200" width="12" height="12" as="geometry"/>
+    </mxCell>
+    <mxCell id="p4_new_cands3" value="&lt;font style=&quot;font-size:8px&quot;&gt;•&lt;/font&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#6c8ebf;strokeColor=#6c8ebf;fontSize=8;" vertex="1" parent="1">
+      <mxGeometry x="830" y="210" width="12" height="12" as="geometry"/>
+    </mxCell>
+    <mxCell id="p4_cands_label" value="&lt;font style=&quot;font-size:8px;color:#6c8ebf&quot;&gt;New Candidate&lt;br&gt;Intercept Points&lt;/font&gt;" style="text;html=1;align=left;fontSize=8;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="885" y="185" width="80" height="25" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p4_new_ip" value="&lt;b style=&quot;font-size:9px&quot;&gt;IP'&lt;/b&gt;" style="ellipse;whiteSpace=wrap;html=1;fillColor=#82b366;strokeColor=#82b366;fontSize=9;fontColor=#ffffff;" vertex="1" parent="1">
+      <mxGeometry x="870" y="230" width="22" height="22" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p4_new_path" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#82b366;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="637" y="197" as="sourcePoint"/>
+        <mxPoint x="870" y="241" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+    <mxCell id="p4_path_label" value="&lt;font style=&quot;font-size:8px;color:#82b366&quot;&gt;&lt;b&gt;New Intercept&lt;br&gt;Path&lt;/b&gt;&lt;/font&gt;" style="text;html=1;align=center;fontSize=8;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="730" y="195" width="70" height="25" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p4_hungarian" value="&lt;b&gt;Hungarian&lt;br&gt;Matching Updated&lt;/b&gt;" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="810" y="280" width="140" height="40" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="p4_marl" value="&lt;b&gt;MARL Selects&lt;br&gt;Best IP'&lt;/b&gt;" style="shape=rect;rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;fontFamily=Helvetica;" vertex="1" parent="1">
+      <mxGeometry x="810" y="340" width="140" height="40" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="arr_p4h" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1.5;strokeColor=#d6b656;" edge="1" source="p4_new_ip" target="p4_hungarian" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="arr_p4m" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=1.5;strokeColor=#9673a6;" edge="1" source="p4_hungarian" target="p4_marl" parent="1">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="arr_12" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#999999;fontSize=14;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="250" y="230" as="sourcePoint"/>
+        <mxPoint x="270" y="230" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="arr_23" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#999999;fontSize=14;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="500" y="230" as="sourcePoint"/>
+        <mxPoint x="520" y="230" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+
+    <mxCell id="arr_34" value="" style="endArrow=block;endFill=1;html=1;strokeWidth=2;strokeColor=#999999;fontSize=14;" edge="1" parent="1">
+      <mxGeometry relative="1" as="geometry">
+        <mxPoint x="750" y="230" as="sourcePoint"/>
+        <mxPoint x="770" y="230" as="targetPoint"/>
+      </mxGeometry>
+    </mxCell>
+  </root>
+</mxGraphModel>

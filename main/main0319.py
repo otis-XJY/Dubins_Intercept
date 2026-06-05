@@ -25,41 +25,44 @@ from intercept.Prediction.predictLikelyTarget import predictLikelyTargetNew
 from intercept.IsoPair.obtainNearTPall import obtainNearETP,obtainNearTP
 from intercept.IsoPair.obtainPE2TP import obtainPE2TP
 from intercept.IsoPair.obtainIsoPath import insertIsoMapP2TP
+from intercept.IsoPair.obtainRLOutput import obtain_output_iso,obtainNeighbour
+
+TimeMap='0320_0920'
+TimeIso='0320_0920'
 
 # === 1. 视频保存配置 (在循环开始前) ===
 # 使用系统当前时间生成文件名（格式：MMDD_HHMM）
 current_time = datetime.now().strftime('%m%d_%H%M')
 
 # 创建output文件夹（如果不存在）
-output_dir = 'output'
+output_dir = 'output/'+TimeMap+'/'+TimeIso
 if not os.path.exists(output_dir):
     os.makedirs(output_dir)
 
 output_video_name = os.path.join(output_dir, f'uav_interception_{current_time}.mp4')
-TimeMap='_0305_1800'
-TimeIso='_0305_1800'
 
 
-Map = joblib.load('Map'+TimeMap+'.jbl')	
 
-IsoMapPTP2Iso_i_tt = joblib.load('IsoMapPTP2Iso_i_tt'+TimeMap+'.jbl')	  
-IsoMapPIso2TP_i_tt=joblib.load('IsoMapPIso2TP_i_tt'+TimeMap+'.jbl')
-pathFinalMapPTP2Iso = joblib.load('pathFinalMapPTP2Iso'+TimeMap+'.jbl')
+Map = joblib.load('./map/'+TimeMap+'/Map.jbl')	
 
-pathFinalE2ValIn = joblib.load('pathFinalE2ValIn'+TimeIso+'.jbl')	
-PathE2Val_true=joblib.load('PathE2Val_true'+TimeIso+'.jbl')
+IsoMapPTP2Iso_i_tt = joblib.load('./map/'+TimeMap+'/IsoMapPTP2Iso_i_tt.jbl')	  
+IsoMapPIso2TP_i_tt=joblib.load('./map/'+TimeMap+'/IsoMapPIso2TP_i_tt.jbl')
+pathFinalMapPTP2Iso = joblib.load('./map/'+TimeMap+'/pathFinalMapPTP2Iso.jbl')
 
-IsoMapTP2Val_i_tt = joblib.load('IsoMapTP2Val_i_tt'+TimeMap+'.jbl')
-pathFinalTP2Val = joblib.load('pathFinalTP2Val'+TimeMap+'.jbl')
+pathFinalE2ValIn = joblib.load('./map/'+TimeIso+'/pathFinalE2ValIn.jbl')	
+PathE2Val_true=joblib.load('./map/'+TimeIso+'/PathE2Val_true.jbl')
+
+IsoMapTP2Val_i_tt = joblib.load('./map/'+TimeMap+'/IsoMapTP2Val_i_tt.jbl')
+pathFinalTP2Val = joblib.load('./map/'+TimeMap+'/pathFinalTP2Val.jbl')
 
 length_E_max=0
 for i in range(len(pathFinalE2ValIn)):
     for j in range(len(pathFinalE2ValIn[i])):
         length_E_max=max(length_E_max,len(pathFinalE2ValIn[i][j][0]))
 
-IsoMapETP2Iso_i_tt=joblib.load('IsoMapETP2Iso_i_tt'+TimeMap+'.jbl')
-IsoMapEIso2TP_i_tt=joblib.load('IsoMapEIso2TP_i_tt'+TimeMap+'.jbl')
-pathFinalMapETP2Iso=joblib.load('pathFinalMapETP2Iso'+TimeMap+'.jbl')
+IsoMapETP2Iso_i_tt=joblib.load('./map/'+TimeMap+'/IsoMapETP2Iso_i_tt.jbl')
+IsoMapEIso2TP_i_tt=joblib.load('./map/'+TimeMap+'/IsoMapEIso2TP_i_tt.jbl')
+pathFinalMapETP2Iso=joblib.load('./map/'+TimeMap+'/pathFinalMapETP2Iso.jbl')
 
 # 1. 图形窗口清理
 # MATLAB: clf, close all
@@ -114,6 +117,11 @@ obs_polygons = [
 ]
 CapRef['obs_polygons'] = obs_polygons
 
+# RL输出邻域半径配置
+distance_P = float(CapRef['CapDistRef'])
+distance_E = float(CapRef['CapDistRef'])
+distance_V = float(CapRef['CapDistRef'])
+
 num_E = Evader.shape[0]
 num_P = PStart_Point.shape[0]
 
@@ -153,7 +161,10 @@ PathP = [None] * num_P
 for pid in range(num_P):
     PathP[pid] = np.tile(PosP[pid].reshape(-1, 1), (1, length_E_max))
 
-PathE = PathE2Val_true
+PathE = [None] * num_E
+for eid in range(num_E):
+    PathE[eid] =  PathE2Val_true[eid][:int(TimeRes / Stepsize*v_E),:].T
+
 
 
 
@@ -186,6 +197,8 @@ with writer.saving(fig, output_video_name, dpi=100):
     UnCapPidNew=UnCapPid
     UnCapEid=np.array([i for i in range(num_E)])
     UnCapEidNew=UnCapEid
+    step = 0  # 决策步: 仅在触发重规划时递增
+    decision_outputs = []
     while (not np.all(Capflag)) and (t_all < length_E_max /v_E):
 
         # --- 1. 时间更新 ---
@@ -249,6 +262,7 @@ with writer.saving(fig, output_video_name, dpi=100):
 
         # --- 5. 重新规划逻辑 ---
         if not flagIn:
+            step += 1
             # 轨迹预测
             traj = [PathE2Val_true[i][:int(t_all * v_E), :] for i in range(num_E)]
             targets = ValuePos[:, :2]
@@ -392,6 +406,52 @@ with writer.saving(fig, output_video_name, dpi=100):
                 )
 
                 IC = InterceptCandidates.copy()
+
+                # 仅在决策时刻输出，并以Pid作为主键对齐。
+                output_P_state = {int(pid): PosP[idx].copy() for idx, pid in enumerate(UnCapPid)}
+                output_P_alley_state = obtainNeighbour(
+                    PosP,
+                    PosP,
+                    distance_P,
+                    query_ids=UnCapPid,
+                    target_ids=UnCapPid,
+                    return_mode="dict",
+                )
+                output_enemy_state = obtainNeighbour(
+                    PosP,
+                    PosE,
+                    distance_E,
+                    query_ids=UnCapPid,
+                    target_ids=UnCapEid,
+                    return_mode="dict",
+                )
+                output_IsoP = obtain_output_iso(IC, IsoMapP2TP_i_tt, None)
+                output_E_state = {int(eid): PosE[idx].copy() for idx, eid in enumerate(UnCapEid)}
+                output_V_state = obtainNeighbour(
+                    PosP,
+                    ValuePos,
+                    distance_V,
+                    query_ids=UnCapPid,
+                    target_ids=np.arange(ValuePos.shape[0]),
+                    return_mode="dict",
+                )
+
+                decision_outputs.append(
+                    {
+                        "step": int(step),
+                        "t_all": float(t_all),
+                        "pids": UnCapPid.copy(),
+                        "eids": UnCapEid.copy(),
+                        "output_P_state": output_P_state,
+                        "output_P_alley_state": output_P_alley_state,
+                        "output_enemy_state": output_enemy_state,
+                        "output_IsoP": output_IsoP,
+                        "output_E_state": output_E_state,
+                        "output_V_state": output_V_state,
+                    }
+                )
+
+
 # plt.figure(figsize=(10, 8))
 # draw_candidates(IC_candidates, IsoMap_i_tt_P2Iso, IsoMap_i_tt_E2Iso, pathFinalE2ValIn, pathFinalP2TP)
 # Draw_map(PStart_Point, Trans_Point, ValuePos, obs, sure, obs_no_circle, obs_no_circle_in)
@@ -407,24 +467,11 @@ with writer.saving(fig, output_video_name, dpi=100):
                     # 提取当前 (Eid_ref, Pid_ref) 对的所有候选行
                     mask = (IC[:, 11] == eid_val) & (IC[:, 12] == pid_val)
                     group = IC[mask]
-                    
-                    # --- 第一层筛选：cost (索引8) 最小的前 50% ---
-                    # 按 cost 升序排序
-                    group = group[np.argsort(group[:, 8])]
-                    n1 = max(1, int(np.ceil(len(group) * 0.5)))
-                    group = group[:n1]
-                    
-                    # --- 第二层筛选：Delta_t (索引15) 最大的前 50% ---
-                    # 注意：costAll 开始于索引 15，所以 15 是 Delta_t
-                    # 按 Delta_t 降序排序
-                    group = group[np.argsort(group[:, 15])[::-1]]
-                    n2 = max(1, int(np.ceil(len(group) * 0.5)))
-                    group = group[:n2]
-                    
-                    # --- 第三层筛选：Delta_d (索引16) 最小的那一行 ---
-                    # 索引 16 是 Delta_d
-                    best_row_idx = np.argmax(group[:, 16])
-                    best_candidates_list.append(group[best_row_idx])
+
+                    # 按优先级排序：索引15 Delt_t降序，索引8 cost 升序，索引16 Delat_d 升序
+                    # np.lexsort 的最后一个键为主键
+                    sort_idx = np.lexsort((group[:, 16], group[:, 8], -group[:, 15]))
+                    best_candidates_list.append(group[sort_idx[0]])
 
                 # 转换为 numpy 数组
                 IC_candidates = np.array(best_candidates_list)
