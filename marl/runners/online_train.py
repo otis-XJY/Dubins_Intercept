@@ -46,6 +46,7 @@ class TrainConfig:
     lr: float = 3e-4
     hidden_dim: int = 128
     num_heads: int = 4
+    pos_scale: float = 1000.0
     seed: int = 42
     device: str = "cpu"
     distributed: bool = False
@@ -549,6 +550,7 @@ def train_online(cfg: TrainConfig):
         cfg.schemes,
         hidden_dim=cfg.hidden_dim,
         num_heads=cfg.num_heads,
+        pos_scale=cfg.pos_scale,
         device=device,
     )
 
@@ -1231,6 +1233,7 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--num-heads", type=int, default=4)
+    parser.add_argument("--pos-scale", type=float, default=1000.0)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--distributed", type=_str2bool, default=False)
@@ -1382,6 +1385,7 @@ def _parse_args() -> TrainConfig:
         lr=args.lr,
         hidden_dim=args.hidden_dim,
         num_heads=args.num_heads,
+        pos_scale=args.pos_scale,
         seed=args.seed,
         device=args.device,
         distributed=bool(args.distributed),

@@ -128,6 +128,59 @@ class HeterogeneousAttentionAB(nn.Module):
         return ctx, weights
 
 
+class AllyCoordCrossAttention(nn.Module):
+    """Design D 阶段2：候选点(query) 对友军上下文(K/V) 做 cross-attn，得到每候选点的协同上下文。
+
+    K/V = concat(e_ally, e_ally_pts, e_eally, e_ast_a)；padding mask 由对应的有效性 mask 拼接。
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+
+    def forward(
+        self,
+        *,
+        q: torch.Tensor,  # (B,N,D) 自候选点
+        e_ally: torch.Tensor,  # (B,A,D)
+        e_ally_pts: torch.Tensor,  # (B,Ma,D)
+        e_eally: torch.Tensor,  # (B,A,D)
+        e_ast_a: torch.Tensor,  # (B,A,D)
+        ally_mask: torch.Tensor,  # (B,A) True=valid
+        ally_pts_mask: torch.Tensor,  # (B,Ma) True=valid
+        ally_enemy_mask: torch.Tensor,  # (B,A) True=valid
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ctx = torch.cat([e_ally, e_ally_pts, e_eally, e_ast_a], dim=1)
+        key_padding_mask = torch.cat(
+            [
+                ~ally_mask.bool(),
+                ~ally_pts_mask.bool(),
+                ~ally_enemy_mask.bool(),
+                ~ally_enemy_mask.bool(),
+            ],
+            dim=1,
+        )
+        all_masked = key_padding_mask.all(dim=-1)
+        if all_masked.any():
+            key_padding_mask = key_padding_mask.clone()
+            key_padding_mask[all_masked, :] = False
+
+        out, w = self.attn(
+            query=q,
+            key=ctx,
+            value=ctx,
+            key_padding_mask=key_padding_mask,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+        if all_masked.any():
+            out = out.clone()
+            out[all_masked] = 0.0
+            w = w.clone()
+            w[all_masked] = 0.0
+        return out, w
+
+
 class PointsContextCrossAttention(nn.Module):
     """Design C: Q=E_points, K/V=E_context (concat of 8 types, excluding points from Q side)."""
 

@@ -14,6 +14,7 @@ def build_actor_critic_schemes(
     *,
     hidden_dim: int = 128,
     num_heads: int = 4,
+    pos_scale: float = 1000.0,
     device: Optional[Union[str, torch.device]] = None,
 ) -> Dict[str, "TODCHeteroActorCritic"]:
     if schemes is None:
@@ -38,6 +39,7 @@ def build_actor_critic_schemes(
             hidden_dim=hidden_dim,
             design_mode=key,
             num_heads=num_heads,
+            pos_scale=pos_scale,
         )
         if device is not None:
             model = model.to(device)
@@ -54,6 +56,7 @@ class TODCHeteroActorCritic(nn.Module):
         design_mode: Optional[str] = None,
         num_heads: int = 4,
         use_soft_gating: Optional[bool] = None,
+        pos_scale: float = 1000.0,
     ):
         super().__init__()
         self.model = UAVInterceptionNetwork(
@@ -61,6 +64,7 @@ class TODCHeteroActorCritic(nn.Module):
             num_heads=num_heads,
             design_mode=design_mode,
             use_soft_gating=use_soft_gating,
+            pos_scale=pos_scale,
         )
 
     def forward(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:

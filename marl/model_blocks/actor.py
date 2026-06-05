@@ -56,6 +56,48 @@ class PointwiseScoringActor(nn.Module):
         return self.mlp(x).squeeze(-1)
 
 
+class SelfStageScorer(nn.Module):
+    """Design D 阶段1：由自身上下文 self_ctx 对每个自候选点逐点打分，得 logits_self。"""
+
+    def __init__(self, embed_dim: int, hidden_dim: int | None = None):
+        super().__init__()
+        d = int(embed_dim)
+        h = int(hidden_dim) if hidden_dim is not None else d
+        self.mlp = nn.Sequential(
+            nn.Linear(d * 2, h),
+            nn.GELU(),
+            nn.Linear(h, 1),
+        )
+
+    def forward(self, self_ctx: torch.Tensor, e_self_pts: torch.Tensor) -> torch.Tensor:
+        # self_ctx (B,D)；e_self_pts (B,N,D) -> logits (B,N)
+        n = e_self_pts.shape[1]
+        ctx = self_ctx.unsqueeze(1).expand(-1, n, -1)
+        x = torch.cat([e_self_pts, ctx], dim=-1)
+        return self.mlp(x).squeeze(-1)
+
+
+class CoordResidualHead(nn.Module):
+    """Design D 阶段2：由候选点的协同上下文产生残差 delta（最后一层 zero-init，初始 delta≈0）。"""
+
+    def __init__(self, embed_dim: int, hidden_dim: int | None = None):
+        super().__init__()
+        d = int(embed_dim)
+        h = int(hidden_dim) if hidden_dim is not None else d
+        self.mlp = nn.Sequential(
+            nn.Linear(d * 2, h),
+            nn.GELU(),
+            nn.Linear(h, 1),
+        )
+        # 残差头 zero-init：训练起点为纯自身策略，协同修正从 0 学起（幅度不受约束）
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
+
+    def forward(self, e_self_pts: torch.Tensor, coord_ctx: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([e_self_pts, coord_ctx], dim=-1)
+        return self.mlp(x).squeeze(-1)
+
+
 def postprocess_mask_and_sample(
     *,
     logits: torch.Tensor,  # (B,N)

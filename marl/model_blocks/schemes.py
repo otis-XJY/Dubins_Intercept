@@ -7,6 +7,7 @@ SCHEME_KEY_TO_NAME = {
     "A": "Concatenative Query Network",
     "B": "Gated Query Network",
     "C": "Point-Wise Scoring Network",
+    "D": "Two-Stage Residual Network",
 }
 
 _SCHEME_ALIAS_TO_KEY = {
@@ -26,6 +27,12 @@ _SCHEME_ALIAS_TO_KEY = {
     "point_wise_scoring_network": "C",
     "pointwise scoring network": "C",
     "pwsn": "C",
+    "d": "D",
+    "two-stage residual network": "D",
+    "two_stage_residual_network": "D",
+    "tsr": "D",
+    "two-stage": "D",
+    "two_stage": "D",
 }
 
 

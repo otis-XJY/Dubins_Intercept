@@ -61,6 +61,34 @@ def test_phase3_model_forward_and_masking():
     assert idx[1].item() == -1
 
 
+def test_design_d_two_stage_forward_and_masking():
+    bsz, a, m, ma = 2, 3, 8, 6
+    model = UAVInterceptionNetwork(hidden_dim=64, num_heads=4, design_mode="D")
+
+    obs = _fake_obs(bsz, a, m, ma)
+    obs["self_pts_mask"][0, 4:] = False
+    obs["self_pts_mask"][1, :] = False
+
+    out = model(obs)
+    assert out["action_logits"].shape == (bsz, m)
+    assert out["action_probs"].shape == (bsz, m)
+    assert out["best_candidate_idx"].shape == (bsz,)
+    assert out["value"].shape == (bsz,)
+    assert torch.allclose(out["action_probs"][0].sum(), torch.tensor(1.0), atol=1e-5)
+    assert torch.isfinite(out["action_probs"][1]).all()
+    assert out["best_candidate_idx"][1].item() == -1
+
+
+@pytest.mark.parametrize("mode", ["A", "B", "C", "D"])
+def test_critic_params_tracked_by_optimizer(mode):
+    # 回归：critic 必须在构造时就有参数且被 model.parameters() 跟踪（修复懒加载未被优化器更新的 bug）
+    model = UAVInterceptionNetwork(hidden_dim=32, num_heads=4, design_mode=mode)
+    all_ids = {id(p) for p in model.parameters()}
+    crit = list(model.critic.parameters())
+    assert len(crit) > 0
+    assert all(id(p) in all_ids for p in crit)
+
+
 @pytest.mark.parametrize(
     "alias,expected_name",
     [
@@ -68,6 +96,7 @@ def test_phase3_model_forward_and_masking():
         ("Concatenative Query Network", "Concatenative Query Network"),
         ("gqn", "Gated Query Network"),
         ("Point-Wise Scoring Network", "Point-Wise Scoring Network"),
+        ("tsr", "Two-Stage Residual Network"),
     ],
 )
 def test_design_mode_aliases(alias, expected_name):
