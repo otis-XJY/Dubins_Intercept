@@ -129,14 +129,68 @@ class HeterogeneousAttentionAB(nn.Module):
 
 
 class AllyCoordCrossAttention(nn.Module):
-    """Design D 阶段2：候选点(query) 对友军上下文(K/V) 做 cross-attn，得到每候选点的协同上下文。
+    """Design D 阶段2：先用 ISAB 风格 inducing points 压缩友军候选，再做协同 cross-attn。
 
-    K/V = concat(e_ally, e_ally_pts, e_eally, e_ast_a)；padding mask 由对应的有效性 mask 拼接。
+    - 输入中的 e_ally_pts 为展平后的 (B, A*K, D)
+    - 先按友机槽位还原为 (B, A, K, D)，每个友机用 M 个 inducing token 压缩到 (B, A, M, D)
+    - 再拼接紧凑上下文做 cross-attn：K/V = concat(e_ally, compact_ally_pts, e_eally, e_ast_a)
     """
 
-    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0):
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0, num_inducing_points: int = 4):
         super().__init__()
+        self.num_inducing_points = int(num_inducing_points)
+        if self.num_inducing_points <= 0:
+            raise ValueError(f"num_inducing_points must be positive, got {num_inducing_points}")
+
+        self.inducing = nn.Parameter(torch.randn(1, self.num_inducing_points, embed_dim) * 0.02)
+        self.induce_attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
         self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+
+    def _compact_ally_points(
+        self,
+        *,
+        e_ally: torch.Tensor,  # (B,A,D)
+        e_ally_pts: torch.Tensor,  # (B,Ma,D)
+        ally_pts_mask: torch.Tensor,  # (B,Ma)
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        bsz, num_ally, dim = e_ally.shape
+        ma = int(e_ally_pts.shape[1])
+        if num_ally <= 0:
+            raise ValueError(f"num_ally must be positive, got {num_ally}")
+        if ma % num_ally != 0:
+            raise ValueError(f"e_ally_pts length {ma} is not divisible by ally slots {num_ally}")
+
+        k_per_ally = ma // num_ally
+        pts = e_ally_pts.reshape(bsz, num_ally, k_per_ally, dim)
+        pts_mask = ally_pts_mask.bool().reshape(bsz, num_ally, k_per_ally)
+
+        pts_flat = pts.reshape(bsz * num_ally, k_per_ally, dim)
+        pts_mask_flat = pts_mask.reshape(bsz * num_ally, k_per_ally)
+
+        inducing = self.inducing.expand(bsz * num_ally, -1, -1)
+        key_padding_mask = ~pts_mask_flat
+        all_masked = key_padding_mask.all(dim=-1)
+        if all_masked.any():
+            key_padding_mask = key_padding_mask.clone()
+            key_padding_mask[all_masked, :] = False
+
+        compact_flat, _ = self.induce_attn(
+            query=inducing,
+            key=pts_flat,
+            value=pts_flat,
+            key_padding_mask=key_padding_mask,
+            need_weights=False,
+            average_attn_weights=False,
+        )
+        if all_masked.any():
+            compact_flat = compact_flat.clone()
+            compact_flat[all_masked] = 0.0
+
+        compact = compact_flat.reshape(bsz, num_ally, self.num_inducing_points, dim)
+        compact_mask = pts_mask.any(dim=-1, keepdim=True).expand(-1, -1, self.num_inducing_points)
+        compact_seq = compact.reshape(bsz, num_ally * self.num_inducing_points, dim)
+        compact_seq_mask = compact_mask.reshape(bsz, num_ally * self.num_inducing_points)
+        return compact_seq, compact_seq_mask
 
     def forward(
         self,
@@ -150,11 +204,17 @@ class AllyCoordCrossAttention(nn.Module):
         ally_pts_mask: torch.Tensor,  # (B,Ma) True=valid
         ally_enemy_mask: torch.Tensor,  # (B,A) True=valid
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        ctx = torch.cat([e_ally, e_ally_pts, e_eally, e_ast_a], dim=1)
+        compact_ally_pts, compact_ally_pts_mask = self._compact_ally_points(
+            e_ally=e_ally,
+            e_ally_pts=e_ally_pts,
+            ally_pts_mask=ally_pts_mask,
+        )
+
+        ctx = torch.cat([e_ally, compact_ally_pts, e_eally, e_ast_a], dim=1)
         key_padding_mask = torch.cat(
             [
                 ~ally_mask.bool(),
-                ~ally_pts_mask.bool(),
+                ~compact_ally_pts_mask,
                 ~ally_enemy_mask.bool(),
                 ~ally_enemy_mask.bool(),
             ],

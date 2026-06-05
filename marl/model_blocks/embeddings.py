@@ -22,8 +22,8 @@ def _mlp(in_dim: int, hidden_dim: int, out_dim: int, num_layers: int = 2) -> nn.
 #   - 平移：以本机位置为原点
 #   - 旋转：把本机航向对齐到 +x 轴（旋转 -theta_e）
 #   - 朝向：用相对航向的 (sin, cos) 编码，避免 ±pi 跳变
-#   - 尺度：所有“距离量级”通道（rel_x/rel_y/r，以及候选点质量里的 Delta_d/path_L）
-#           除以 pos_scale 归一化；角度 sin/cos 与 Delta_t/Delta_theta/Delta_V 不缩放。
+#   - 尺度：几何距离通道（rel_x/rel_y/r）除以 pos_scale；质量通道采用无参压缩（asinh/log1p/sin-cos）
+#           把长尾量（path_L/Delta_V）压到可学习范围，减少手工调参依赖。
 # 本机 self_uav 在该参考系下退化为 (0,0,0)，因此不再当普通实体编码，改用可学习 ego token。
 
 
@@ -68,25 +68,43 @@ def _transform_point(ent: torch.Tensor, frame, pos_scale: float) -> torch.Tensor
     return torch.stack([rel_x, rel_y, r], dim=-1)
 
 
+def _signed_log1p(x: torch.Tensor) -> torch.Tensor:
+    return torch.sign(x) * torch.log1p(torch.abs(x))
+
+
+def _to_radians(angle: torch.Tensor) -> torch.Tensor:
+    """角度自动统一到弧度：若数值明显超出弧度范围则按度数转弧度。"""
+    return torch.where(angle.abs() > (2.0 * torch.pi), torch.deg2rad(angle), angle)
+
+
 def _transform_candidate(ent: torch.Tensor, frame, pos_scale: float) -> torch.Tensor:
     """候选点 (P,L,8)=[c_x,c_y,theta,Delta_t,Delta_d,Delta_theta,path_L,Delta_V]
-    -> (P,L,10)= 几何5[rel_x,rel_y,r,sin dtheta,cos dtheta] + 质量5[Delta_t, Delta_d/pos_scale,
-    Delta_theta, path_L/pos_scale, Delta_V]。距离量级的 Delta_d/path_L 同样按 pos_scale 归一化。"""
+    -> (P,L,11)= 几何5 + 质量6。
+
+    质量通道使用无参变换：
+    - Delta_t: asinh 压缩（保留正负）
+    - Delta_d/path_L: -log1p(x/pos_scale)（越小越好统一为“越大越好”）
+    - Delta_theta: sin/cos 编码（自动度/弧度兼容）
+    - Delta_V: signed log1p 压缩（保留方向）
+    """
     x_e, y_e, cos_e, sin_e, th_e = frame
     rel_x, rel_y, r = _rel_xy(ent[..., 0], ent[..., 1], x_e, y_e, cos_e, sin_e, pos_scale)
     dth = ent[..., 2] - th_e[:, None]
     geo = torch.stack([rel_x, rel_y, r, torch.sin(dth), torch.cos(dth)], dim=-1)  # (P,L,5)
-    delta_t = ent[..., 3]
-    delta_d = ent[..., 4] / pos_scale
-    delta_theta = ent[..., 5]
-    path_l = ent[..., 6] / pos_scale
-    delta_v = ent[..., 7]
-    qual = torch.stack([delta_t, delta_d, delta_theta, path_l, delta_v], dim=-1)  # (P,L,5)
+
+    delta_t = torch.asinh(ent[..., 3])
+    delta_d = -torch.log1p(torch.clamp(ent[..., 4], min=0.0) / pos_scale)
+    delta_theta = _to_radians(ent[..., 5])
+    delta_theta_sin = torch.sin(delta_theta)
+    delta_theta_cos = torch.cos(delta_theta)
+    path_l = -torch.log1p(torch.clamp(ent[..., 6], min=0.0) / pos_scale)
+    delta_v = _signed_log1p(ent[..., 7] / pos_scale)
+    qual = torch.stack([delta_t, delta_d, delta_theta_sin, delta_theta_cos, path_l, delta_v], dim=-1)  # (P,L,6)
     return torch.cat([geo, qual], dim=-1)
 
 
 class StructuredCandidateEncoder(nn.Module):
-    """候选点结构化编码：几何分支(5维) 与 质量分支(5维) 各自 MLP -> 拼接 -> 投影到 D。
+    """候选点结构化编码：几何分支(5维) 与 质量分支(6维) 各自 MLP -> 拼接 -> 投影到 D。
 
     几何分支回答“候选点在哪/朝向”，质量分支回答“这个拦截计划有多好”，两者尺度/语义不同，
     分开编码避免相互淹没，再融合到统一 D 维。
@@ -98,7 +116,7 @@ class StructuredCandidateEncoder(nn.Module):
         d_geo = d // 2
         d_qual = d - d_geo
         self.geo = _mlp(5, d, d_geo)
-        self.qual = _mlp(5, d, d_qual)
+        self.qual = _mlp(6, d, d_qual)
         self.proj = nn.Linear(d, d)
 
     def forward(self, cand: torch.Tensor) -> torch.Tensor:

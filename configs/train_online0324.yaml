@@ -78,9 +78,10 @@ gpu_ids: 0,4
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
-  - Concatenative Query Network   # 设计 A：拼接融合
-  - Gated Query Network           # 设计 B：门控融合
-  # - Point-Wise Scoring Network    # 设计 C：逐候选点评分
+  - Point-Wise Scoring Network     # 设计 C：逐候选点评分（主模型）
+  - Two-Stage Residual Network     # 设计 D：两段式残差协同
+  # - Concatenative Query Network  # 设计 A：拼接融合（保留兼容）
+  # - Gated Query Network          # 设计 B：门控融合（保留兼容）
 
 # --- 环境动力学（传入 TODCMARLEnv 的项）---
 # 与仿真步长相关的时间分辨率（见 env.time_res / sim_dt）

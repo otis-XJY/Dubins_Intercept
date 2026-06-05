@@ -24,3 +24,4 @@ AI/
 wandb/
 .worktrees/
 worktrees/
+.catpaw/

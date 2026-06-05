@@ -121,7 +121,7 @@ class UAVInterceptionNetwork(nn.Module):
         elif self.design_mode == "C":
             self.points_ctx = PointsContextCrossAttention(self.hidden_dim, self.num_heads)
             self.score_c = PointwiseScoringActor(self.hidden_dim, score_hidden_dim=self.hidden_dim * 2)
-            # Critic for scheme C uses the same fused representation as A (concat over 8 branches).
+            # Critic for scheme C uses concat fusion over 8 branches.
             self._c_fusion_for_critic = ConcatMLPFusion8(self.hidden_dim)
         else:  # design_mode == "D"：两段式残差决策头
             self.self_ctx_fuse = nn.Sequential(
@@ -132,31 +132,57 @@ class UAVInterceptionNetwork(nn.Module):
             self.coord_attn = AllyCoordCrossAttention(self.hidden_dim, self.num_heads)
             self.stage1_scorer = SelfStageScorer(self.hidden_dim)
             self.coord_head = CoordResidualHead(self.hidden_dim)
+            # D 的 critic 与 C 对齐：走同源 attn_ab + concat fusion，避免廉价 mean-pool 的表征失配。
+            self._c_fusion_for_critic = ConcatMLPFusion8(self.hidden_dim)
 
         self.critic = PermInvariantCritic(embed_dim=self.hidden_dim, hidden_dim=self.hidden_dim)
 
+        # 前向缓存：同一 obs 对象下复用 embedding/shared_ctx，减少 actor->critic 重复计算。
+        self._cache_obs_ref = None
+        self._cache_embs = None
+        self._cache_ctx = None
+        self._cache_attn_w = None
+
+    def _ensure_cache_obs(self, obs: Dict[str, torch.Tensor]) -> None:
+        if self._cache_obs_ref is obs:
+            return
+        self._cache_obs_ref = obs
+        self._cache_embs = None
+        self._cache_ctx = None
+        self._cache_attn_w = None
+
     def _embed(self, obs: Dict[str, torch.Tensor]):
         """仅做实体编码，返回 8 个 e_*（不跑异构注意力）。"""
-        return self.emb(obs)
+        self._ensure_cache_obs(obs)
+        if self._cache_embs is None:
+            self._cache_embs = self.emb(obs)
+        return self._cache_embs
 
-    def _shared_ctx(self, obs: Dict[str, torch.Tensor]):
-        e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a = self._embed(obs)
-        ctx, attn_w = self.attn_ab(
-            e_self=e_self,
-            e_ally=e_ally,
-            e_self_pts=e_self_pts,
-            e_ally_pts=e_ally_pts,
-            e_eself=e_eself,
-            e_eally=e_eally,
-            e_ast_s=e_ast_s,
-            e_ast_a=e_ast_a,
-            ally_mask=obs["ally_mask"],
-            self_pts_mask=obs["self_pts_mask"],
-            ally_pts_mask=obs["ally_pts_mask"],
-            enemy_self_mask=obs["enemy_self_mask"].bool(),
-            ally_enemy_mask=obs["ally_enemy_mask"],
-        )
-        return (e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a), ctx, attn_w
+    def _shared_ctx(self, obs: Dict[str, torch.Tensor], embs=None):
+        self._ensure_cache_obs(obs)
+        if embs is None:
+            embs = self._embed(obs)
+        else:
+            self._cache_embs = embs
+
+        if self._cache_ctx is None or self._cache_attn_w is None:
+            e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a = embs
+            self._cache_ctx, self._cache_attn_w = self.attn_ab(
+                e_self=e_self,
+                e_ally=e_ally,
+                e_self_pts=e_self_pts,
+                e_ally_pts=e_ally_pts,
+                e_eself=e_eself,
+                e_eally=e_eally,
+                e_ast_s=e_ast_s,
+                e_ast_a=e_ast_a,
+                ally_mask=obs["ally_mask"],
+                self_pts_mask=obs["self_pts_mask"],
+                ally_pts_mask=obs["ally_pts_mask"],
+                enemy_self_mask=obs["enemy_self_mask"].bool(),
+                ally_enemy_mask=obs["ally_enemy_mask"],
+            )
+        return embs, self._cache_ctx, self._cache_attn_w
 
     def _h_env(self, obs: Dict[str, torch.Tensor], ctx) -> torch.Tensor:
         if self.design_mode == "A":
@@ -166,35 +192,14 @@ class UAVInterceptionNetwork(nn.Module):
             assert self.fusion_b is not None
             h_env, _gate = self.fusion_b(ctx)
             return h_env
+        # C/D 统一使用同源 concat fusion（来自 attn_ab 的 8 路上下文）
         assert self._c_fusion_for_critic is not None
         return self._c_fusion_for_critic(ctx)
 
-    def _pool_embeddings(self, obs: Dict[str, torch.Tensor], embs) -> torch.Tensor:
-        """对全部实体 token 做 masked mean，得每机 h_env (P, D)。设计 D 的 critic 用此廉价表征，避免重算异构注意力。"""
-        e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a = embs
-        p = e_self.shape[0]
-        ones1 = torch.ones((p, 1), device=e_self.device, dtype=torch.bool)
-        toks = torch.cat([e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a], dim=1)
-        masks = torch.cat(
-            [
-                ones1,
-                obs["ally_mask"].bool(),
-                obs["self_pts_mask"].bool(),
-                obs["ally_pts_mask"].bool(),
-                obs["enemy_self_mask"].bool(),
-                obs["ally_enemy_mask"].bool(),
-                obs["enemy_self_mask"].bool(),
-                obs["ally_enemy_mask"].bool(),
-            ],
-            dim=1,
-        ).float().unsqueeze(-1)
-        s = (toks * masks).sum(dim=1)
-        c = masks.sum(dim=1).clamp(min=1.0)
-        return s / c
-
     def _actor_forward_d(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """设计 D：阶段1 自身打分 + 阶段2 友军协同残差。"""
-        e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a = self._embed(obs)
+        embs = self._embed(obs)
+        e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a = embs
         assert self.self_ctx_fuse is not None and self.coord_attn is not None
         assert self.stage1_scorer is not None and self.coord_head is not None
 
@@ -277,12 +282,10 @@ class UAVInterceptionNetwork(nn.Module):
         return out
 
     def critic_forward(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        if self.design_mode == "D":
-            # 设计 D：用廉价池化表征作 h_env，不重算异构注意力
-            h_env = self._pool_embeddings(obs, self._embed(obs))  # (P, D)
-        else:
-            _, ctx, _attn_w = self._shared_ctx(obs)
-            h_env = self._h_env(obs, ctx)  # (P, D)
+        # C/D 对齐：critic 都基于同源 attn_ab + fusion 表征，减少 policy/value 表征失配。
+        embs = self._embed(obs)
+        _, ctx, _attn_w = self._shared_ctx(obs, embs=embs)
+        h_env = self._h_env(obs, ctx)  # (P, D)
         h_global = self.global_encoder(obs)  # (D,)
         return self.critic(h_env, h_global)
 

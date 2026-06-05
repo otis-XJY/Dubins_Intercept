@@ -12,41 +12,43 @@
 
 ---
 
-## 实施摘要（Tier 0–2，2026-05）
+## 实施摘要（Tier 0–2 + C/D 对齐，2026-06）
 
-> **说明**：下列改动已在工作区落地并通过 `pytest tests/test_phase3_models.py`（13 项全绿）；**尚未 git commit**。`wandb/run-20260529_001423-lxs7dmoh` 启动于 commit `d0f285f`，**不含**本次任何改动（无 `pos_scale`、无相对坐标、旧 `CentralCritic`），不能用于验证新网络。
+> **说明**：下列改动已在工作区落地；历史改动曾通过 `pytest tests/test_phase3_models.py`（13 项全绿）。本轮新增修改已完成 `read_lints` 与 `python3 -m py_compile` 语法检查；**尚未 git commit**。`wandb/run-20260529_001423-lxs7dmoh` 启动于 commit `d0f285f`，**不含**本次任何改动（无 `pos_scale`、无相对坐标、旧 `CentralCritic`），不能用于验证新网络。
 
 ### 已完成
 
 | 阶段 | 内容 | 主要文件 | 适用范围 |
 |------|------|----------|----------|
 | **阶段 0** | `PermInvariantCritic` 静态构建，替换懒加载 `CentralCritic`；修复 critic 参数未被优化器跟踪的 bug | `critic.py`, `network.py` | A/B/C/D 共用 |
-| **Tier 1** | Ego-centric 相对坐标：位姿 3→5、点 2→3、候选 8→10；本机用可学习 `ego_token` | `embeddings.py` | A/B/C/D 共用 |
-| **Tier 1** | `StructuredCandidateEncoder`：几何 5 维 + 质量 5 维双分支 MLP → 投影 D（方案 2） | `embeddings.py` | A/B/C/D 共用 |
+| **Tier 1** | Ego-centric 相对坐标：位姿 3→5、点 2→3；候选内部编码输入从 8 扩展为 几何5+质量6（11 维） | `embeddings.py` | A/B/C/D 共用 |
+| **Tier 1** | `StructuredCandidateEncoder`：几何 5 维 + 质量 6 维双分支 MLP → 投影 D（方案 2） | `embeddings.py` | A/B/C/D 共用 |
 | **Tier 1** | 共享 `enc_cand` + `role_self_pts` / `role_ally_pts` 区分自/友候选（建议 2 部分） | `embeddings.py` | A/B/C/D 共用 |
 | **Tier 1** | Embedding 内 `_mlp` 激活 ReLU→GELU（方案 13 部分） | `embeddings.py` | A/B/C/D 共用 |
-| **Tier 1** | `pos_scale` 归一化：`rel_x/rel_y/r/Δd/path_L` 除以可配置常数（默认 1000） | `embeddings.py` | A/B/C/D 共用 |
+| **Tier 1** | 质量特征无参尺度改造：`asinh/log1p/signed_log1p/sin-cos` + 自动度弧兼容，减少长尾与方向不一致 | `embeddings.py` | A/B/C/D 共用 |
 | **Tier 1** | `pos_scale` 透传：YAML → `TrainConfig` → `build_actor_critic_schemes` → `UAVInterceptionNetwork` | `online_train.py`, `models.py`, `train_online0324.yaml` | 训练全局 |
 | **Tier 2** | **设计 D**（Two-Stage Residual Network）：`SelfStageScorer` + `AllyCoordCrossAttention` + `CoordResidualHead`（zero-init） | `actor.py`, `attention.py`, `network.py`, `schemes.py` | 仅 scheme D |
-| **Tier 2** | `_embed()` 与 `attn_ab` 拆分；D 的 actor 只跑 embedding，critic 用廉价池化 | `network.py` | 设计 D |
-| **验证** | `test_design_d_*`、`test_critic_params_tracked_by_optimizer`、设计别名 `tsr`/`two-stage` | `tests/test_phase3_models.py` | — |
+| **Tier 2** | D 的 critic 与 C 对齐：统一走 `attn_ab` + `ConcatMLPFusion8`，移除廉价 mean-pool 路径 | `network.py` | 设计 C/D |
+| **Tier 2** | 前向缓存优化：同一 `obs` 下复用 embedding/shared_ctx，减少 actor→critic 重复计算 | `network.py` | 设计 C/D |
+| **训练配置** | 默认 `schemes` 改为 C + D（A/B 保留注释兼容） | `train_online0324.yaml` | 训练全局 |
+| **验证** | 历史模型测试 `test_design_d_*`、`test_critic_params_tracked_by_optimizer`；本轮执行 lints + py_compile | `tests/test_phase3_models.py`, `network.py`, `embeddings.py` | — |
 
 ### 未完成（下一批建议）
 
 | 优先级 | 内容 | 对应编号 |
 |--------|------|----------|
-| **高** | `RunningMeanStd` 逐特征在线标准化，替代手工 `pos_scale` | 建议 5（完整）、方案 3 替代 |
 | **高** | 用新代码重训并对比旧 run 的 `grad_norm` / `explained_variance` / `episode_entropy` | — |
 | **中** | 统一 token + 单层 Transformer encoder，替换 7 路 star cross-attention | 建议 2（完整）、方案 10 |
 | **中** | Attention 块 Pre-LN + 残差 FFN；全局 ReLU→GELU | 建议 5、方案 13（完整） |
 | **中** | `hidden_dim` 128→256 消融 | 方案 12 |
-| **低** | 相对位置编码 / ALiBi / FiLM / Enhanced Embedding / Quality 方向翻转 | 方案 4–11、方案 6 |
+| **低** | LearnableFeatureScale 或 RunningMeanStd（仅在无参压缩不足时再引入） | 方案 3（完整）、建议 5（完整） |
+| **低** | 相对位置编码 / ALiBi / FiLM / Enhanced Embedding | 方案 6–11 |
 | **低** | Critic 全局候选统计、attention 全局聚合 | 方案 14（完整） |
 | **低** | 在 `generator.py` 侧统一 ego-centric（当前仅在 embedding 前向变换） | 建议 1（完整） |
 
 ### 架构现状（一句话）
 
-主体仍是 **分散 MLP 编码 + 7 路 star cross-attention + A/B/C/D 四套 actor 头**；**Embedding 层与 Critic 已完成 Tier 0–1 级改造**；**设计 D 为新增两段式残差决策头**；Attention/Fusion/统一 Transformer **尚未动**。
+主体仍是 **分散 MLP 编码 + 7 路 star cross-attention + A/B/C/D 四套 actor 头**；**Embedding 已完成无参尺度改造（质量 6 维）**；**D 的 critic 已与 C 对齐并加入前向缓存优化**；统一 Transformer / Pre-LN block 仍未动。
 
 ---
 
@@ -73,14 +75,14 @@
 
 ### 方案 2：位置-质量双分支 Embedding（修正版） ✅
 
-> **落地状态**：已完成。`marl/model_blocks/embeddings.py` → `StructuredCandidateEncoder`：几何 5 维 `[rel_x,rel_y,r,sinΔθ,cosΔθ]` + 质量 5 维 `[Δt,Δd,Δθ,path_L,ΔV]`，各过子 MLP 到 `D//2`，concat 投影到 D。对 A/B/C/D 全部生效。
+> **落地状态**：已完成并增强。`marl/model_blocks/embeddings.py` → `StructuredCandidateEncoder`：几何 5 维 `[rel_x,rel_y,r,sinΔθ,cosΔθ]` + 质量 6 维 `[asinh(Δt),-log1p(Δd),sin(Δθ),cos(Δθ),-log1p(path_L),signed_log1p(ΔV)]`，各过子 MLP 到 `D//2`，concat 投影到 D。对 A/B/C/D 全部生效。
 
 基于特征物理含义，按「位置 vs 质量」分组：
 
 | 分支 | 特征 | 输出维度 | 语义 |
 |------|------|----------|------|
 | 位置 | `c_x`, `c_y`, `theta` | D//2 | 候选点在哪 |
-| 质量 | `delta_t`, `delta_d`, `delta_theta`, `path_l`, `distance_V` | D//2 | 拦截计划有多好 |
+| 质量 | `asinh(delta_t)`, `-log1p(delta_d)`, `sin/cos(delta_theta)`, `-log1p(path_l)`, `signed_log1p(distance_V)` | D//2 | 拦截计划有多好 |
 
 两分支输出在 D 维上融合。
 
@@ -90,7 +92,7 @@
 
 ### 方案 3：可学习特征尺度归一化（LearnableFeatureScale） ⚠️
 
-> **落地状态**：部分完成。用固定常数 `pos_scale`（默认 1000，YAML/CLI 可配）替代 `LearnableFeatureScale`；未实现 per-feature 可学习 scale/bias。
+> **落地状态**：部分完成。未实现 `LearnableFeatureScale` 参数化缩放；当前采用 `pos_scale` + 无参压缩（`asinh/log1p/signed_log1p/sin-cos`）处理长尾与量纲差异。
 
 ```python
 class LearnableFeatureScale(nn.Module):
@@ -108,9 +110,9 @@ class LearnableFeatureScale(nn.Module):
 
 ---
 
-### 方案 4：Quality Feature 方向归一化 ❌
+### 方案 4：Quality Feature 方向归一化 ⚠️
 
-> **落地状态**：未实施。质量特征仍保留原始符号，未做固定翻转或可学习 scale 初值。
+> **落地状态**：部分完成。`Δd/path_L` 已通过 `-log1p` 统一为“越大越好”；`Δθ` 改为 `sin/cos`；`ΔV` 用 `signed_log1p` 压缩并保留方向。尚未引入显式可学习方向参数。
 
 质量特征「好」的方向不一致，需统一为「越大越好」：
 
@@ -289,8 +291,9 @@ class FiLMFusion(nn.Module):
 | `SelfStageScorer` | `actor.py` | 阶段 1：自身上下文对 `e_self_pts` 逐点打分 → `logits_self` |
 | `AllyCoordCrossAttention` | `attention.py` | 阶段 2：候选点 query 友军上下文 cross-attn |
 | `CoordResidualHead` | `actor.py` | 阶段 2：输出残差 `delta`（最后一层 zero-init） |
-| `_embed()` 拆分 | `network.py` | D 的 actor 只跑 embedding，不重算 7 路 attn_ab |
-| 廉价池化 critic | `network.py` | D 的 critic 对 `e_*` masked mean 得 `h_env` |
+| `_embed()` 拆分 | `network.py` | D 的 actor 只跑 embedding；critic 可复用 shared_ctx 缓存 |
+| critic 与 C 对齐 | `network.py` | D 的 critic 走 `attn_ab + ConcatMLPFusion8 + PermInvariantCritic` |
+| 前向缓存 | `network.py` | 同一 `obs` 下复用 embedding/shared_ctx，减少 actor→critic 重复计算 |
 
 **决策流程**：`logits = logits_self + delta` → mask + softmax → 选候选点索引。
 
@@ -302,7 +305,7 @@ class FiLMFusion(nn.Module):
 
 ### 方案 14：Critic 输入扩展 ⚠️
 
-> **落地状态**：部分完成。`PermInvariantCritic`（attention pooling + 置换不变）✅；`_GlobalStateEncoder` 仍为 13 维 masked-mean，未加入候选点全局统计。
+> **落地状态**：部分完成。`PermInvariantCritic`（attention pooling + 置换不变）✅；D 的 critic 表征已与 C 对齐（同源 `attn_ab+fusion`）✅；`_GlobalStateEncoder` 仍为 13 维 masked-mean，未加入候选点全局统计。
 
 当前 `_GlobalStateEncoder` 只做 mean-pooling（enemies/targets/assets → 13 维），可考虑：
 
@@ -342,7 +345,7 @@ class FiLMFusion(nn.Module):
 
 ### 建议 3：动作头保留「候选点作 query 的指针/逐点打分」（设计 C 方向） ⚠️
 
-> **落地状态**：部分完成。设计 C（`PointwiseScoringActor`）与设计 D（两段式残差）✅；A/B 仍为 h_env 指针式；**未**统一为单一 C 范式。
+> **落地状态**：部分完成。设计 C（`PointwiseScoringActor`）与设计 D（两段式残差）✅；训练配置默认 `schemes` 已切到 C+D；A/B 仍保留兼容实现。
 
 让候选点 token 经过 encoder（或对 encoder 输出做 cross-attn），再逐点打分输出 logits。天然处理变长候选集、对候选顺序置换不变，比「先压成 `h_env` 再点积」更贴合动作选择。
 
@@ -366,7 +369,7 @@ A/B 的「先融合成单一 `h_env`」是信息瓶颈；**C 范式最契合顶�
 
 ### 建议 5：归一化与训练稳定性 ⚠️
 
-> **落地状态**：部分完成。`pos_scale` 常数归一化 + 各 token `LayerNorm` ✅；**未**实现 running mean/std、Pre-LN Transformer block、全局 FFN 残差块。
+> **落地状态**：部分完成。`pos_scale` 常数归一化 + 各 token `LayerNorm` + 质量分支无参压缩（`asinh/log1p/signed_log1p/sin-cos`）✅；**未**实现 running mean/std、Pre-LN Transformer block、全局 FFN 残差块。
 
 - 输入特征做 running mean/std 标准化（坐标、Δt、path_L 尺度差异巨大）
 - 注意力块统一 Pre-LN + 残差 + FFN（dim ≈ 4D）
@@ -378,46 +381,47 @@ A/B 的「先融合成单一 `h_env`」是信息瓶颈；**C 范式最契合顶�
 
 | 优先级 | 内容 | 预期收益 | 落地 |
 |--------|------|----------|------|
-| **1（高/低成本）** | 相对坐标 + 输入标准化 + token 后 LayerNorm | 高 | ⚠️ 部分（缺 running stats） |
+| **1（高/低成本）** | 相对坐标 + 输入标准化 + token 后 LayerNorm | 高 | ⚠️ 部分（running stats 未做，但已加无参压缩） |
 | **2（高）** | 统一 token + 类型/角色 embedding + 共享候选点编码器 | 高 | ⚠️ 部分（缺 Transformer） |
-| **3（高）** | 裸 MHA 升级为完整 Transformer block，动作头收敛到 C 范式 | 高 | ⚠️ 部分（C/D 已有，A/B 未改） |
+| **3（高）** | 裸 MHA 升级为完整 Transformer block，动作头收敛到 C 范式 | 高 | ⚠️ 部分（训练默认 C+D，A/B 仍兼容保留） |
 | **4（高）** | Critic 改置换不变池化（PIC） | 高 | ✅ 已完成 |
 | **5（中）** | 容量缩放（hidden_dim、层数）与消融 | 中 | ❌ 未开始 |
-| **—（Tier 2）** | 设计 D 两段式残差决策头 | 中–高 | ✅ 已完成 |
+| **—（Tier 2）** | 设计 D 两段式残差决策头 + critic 对齐 C + 前向缓存 | 中–高 | ✅ 已完成 |
 
 ---
 
 ## 八、落地状态索引
 
-完整摘要见文档开头 **[实施摘要](#实施摘要tier-022026-05)**。下表与各方案章节标题后的 ✅/⚠️/❌ 标记一致。
+完整摘要见文档开头“实施摘要（Tier 0–2 + C/D 对齐，2026-06）”小节。下表与各方案章节标题后的 ✅/⚠️/❌ 标记一致。
 
 ### 状态总览
 
 | 状态 | 数量 | 编号 |
 |------|------|------|
 | ✅ 已完成 | 3 | 方案 2、建议 4、设计 D |
-| ⚠️ 部分完成 | 8 | 方案 3/5/13/14、建议 1/2/3/5 |
-| ❌ 未开始 | 10 | 方案 1、4、6–12 |
+| ⚠️ 部分完成 | 9 | 方案 3/4/5/13/14、建议 1/2/3/5 |
+| ❌ 未开始 | 9 | 方案 1、6–12 |
 
 ### 已应用（详细）
 
 | 编号 | 状态 | 落地位置 / 说明 |
 |------|------|-----------------|
-| 方案 2 | ✅ | `StructuredCandidateEncoder`：几何 5 维 + 质量 5 维双分支 |
-| 方案 3 | ⚠️ | 固定 `pos_scale` 归一化，无 `LearnableFeatureScale` |
+| 方案 2 | ✅ | `StructuredCandidateEncoder`：几何 5 维 + 质量 6 维双分支（含无参压缩） |
+| 方案 3 | ⚠️ | 无 `LearnableFeatureScale`；采用 `pos_scale` + 无参压缩替代 |
+| 方案 4 | ⚠️ | `Δd/path_L` 用 `-log1p`，`Δθ` 用 `sin/cos`，`ΔV` 用 `signed_log1p` |
 | 方案 5 | ⚠️ | 各 token 独立 `LayerNorm`，非 `RMSNorm` 统一 norm |
 | 方案 13 | ⚠️ | `embeddings.py`、设计 D、critic value head 用 GELU；fusion/A/B actor 仍 ReLU |
-| 方案 14 | ⚠️ | `PermInvariantCritic` ✅；`_GlobalStateEncoder` 仍 13 维 mean-pool |
-| 设计 D | ✅ | `SelfStageScorer` + `AllyCoordCrossAttention` + `CoordResidualHead` |
+| 方案 14 | ⚠️ | `PermInvariantCritic` ✅；D critic 已与 C 对齐；`_GlobalStateEncoder` 仍 13 维 mean-pool |
+| 设计 D | ✅ | `SelfStageScorer` + `AllyCoordCrossAttention` + `CoordResidualHead` + critic C 对齐 + 前向缓存 |
 | 建议 1 | ⚠️ | 在 `embeddings.py` 前向做 ego 变换，**未**改 `generator.py` |
 | 建议 2 | ⚠️ | 共享 `enc_cand` + `role_embedding` + `ego_token` ✅；统一 Transformer ❌ |
-| 建议 3 | ⚠️ | 设计 C/D 为逐点打分；A/B 仍为 h_env 指针式 |
+| 建议 3 | ⚠️ | 设计 C/D 为逐点打分；训练默认 C+D；A/B 保留兼容 |
 | 建议 4 | ✅ | `PermInvariantCritic` 替代旧 `CentralCritic`（并修复优化器未跟踪 bug） |
-| 建议 5 | ⚠️ | `pos_scale` + token LayerNorm；无 running stats、无 Pre-LN Transformer block |
+| 建议 5 | ⚠️ | `pos_scale` + token LayerNorm + 无参压缩；无 running stats、无 Pre-LN Transformer block |
 
 **配置与透传**：`pos_scale` 默认值 1000 → `configs/train_online0324.yaml` → `TrainConfig` → `build_actor_critic_schemes` → `UAVInterceptionNetwork` → `TODCEmbeddings`；CLI `--pos-scale` 可覆盖。
 
-**验证**：`pytest tests/test_phase3_models.py` 13 项全绿（含 `test_design_d_*`、`test_critic_params_tracked_by_optimizer`）。
+**验证**：历史阶段曾通过 `pytest tests/test_phase3_models.py` 13 项全绿（含 `test_design_d_*`、`test_critic_params_tracked_by_optimizer`）；本轮改动已执行 `read_lints` 与 `python3 -m py_compile`。
 
 ### 未应用
 
@@ -425,7 +429,7 @@ A/B 的「先融合成单一 `h_env`」是信息瓶颈；**C 范式最契合顶�
 |------|------|
 | 方案 1 | 四组结构化（空间/时间/几何/路径），当前为双分支方案 2 |
 | 方案 3（完整） | `LearnableFeatureScale` |
-| 方案 4 | Quality 方向归一化 |
+| 方案 4（完整） | 显式可学习方向参数（当前为无参方向统一） |
 | 方案 6 | `EnhancedEmbedding` 3 层残差 MLP |
 | 方案 7–10 | 相对位置编码、ALiBi 偏置、候选相对上下文、分层 attention |
 | 方案 11 | `FiLMFusion` |
@@ -443,7 +447,7 @@ A/B 的「先融合成单一 `h_env`」是信息瓶颈；**C 范式最契合顶�
 | commit | `d0f285f`（改动前） | 含 Tier 0–2 未提交改动 |
 | `pos_scale` | 无 | 默认 1000 |
 | critic | 懒加载 `CentralCritic`（未训练） | `PermInvariantCritic` |
-| schemes | A + B | A/B/C/D 均可选 |
+| schemes | A + B | 默认 C + D（A/B 保留可选） |
 | 典型症状 | `grad_norm` 1787–4666，`explained_variance` B≈0.05 | 需重训验证 |
 
 ---
