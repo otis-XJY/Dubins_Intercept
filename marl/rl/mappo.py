@@ -3,7 +3,7 @@
 与 ``marl.runners.online_train`` 中按回合收集的 rollout 配合；优势在训练端可做标准化。
 """
 
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,20 +19,35 @@ def compute_gae(
     *,
     gamma: float,
     lam: float,
+    dt_seq: Optional[np.ndarray] = None,
+    sim_dt_ref: float = 0.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
+    """广义优势估计 GAE(λ)，支持 semi-MDP 时间修正折扣。
+
     rewards, values: [T, P]; dones: [T] (True 表示该步后 episode 结束);
     last_value: [P]，对最后 next state 的 bootstrap（若已终止可在外部置零）。
+
+    dt_seq: [T] 每步的实际仿真时间增量；sim_dt_ref: 基准仿真步长。
+    当两者均提供且 sim_dt_ref > 0 时，逐步折扣因子为 gamma^(dt_t/sim_dt_ref)，
+    否则退化为固定 gamma（兼容旧调用）。
     """
     t_max, _p = rewards.shape
     adv = np.zeros((t_max, _p), dtype=np.float32)
     gae = np.zeros(_p, dtype=np.float32)
 
+    # 时间修正：逐步折扣因子 gamma_t = gamma^(dt_t / sim_dt_ref)
+    use_time_corrected = (dt_seq is not None) and (sim_dt_ref > 0)
+    if use_time_corrected:
+        gamma_t_seq = np.power(gamma, dt_seq / sim_dt_ref)  # (T,)
+    else:
+        gamma_t_seq = np.full(t_max, gamma, dtype=np.float32)  # (T,)
+
     for t in range(t_max - 1, -1, -1):
         next_v = last_value if t == t_max - 1 else values[t + 1]
         non_term = 1.0 - float(dones[t])
-        delta = rewards[t] + gamma * next_v * non_term - values[t]
-        gae = delta + gamma * lam * non_term * gae
+        g_t = float(gamma_t_seq[t])
+        delta = rewards[t] + g_t * next_v * non_term - values[t]
+        gae = delta + g_t * lam * non_term * gae
         adv[t] = gae
 
     ret = adv + values
@@ -59,11 +74,27 @@ def ppo_minibatch_update(
     minibatch_size: int,
     kl_early_stop_threshold: float = 0.02,
     verbose: bool = False,
+    # 时序历史支持（Design D 多帧输入）
+    self_ctx_seq: Optional[np.ndarray] = None,
+    self_ctx_seq_mask: Optional[np.ndarray] = None,
+    temporal_window: int = 0,
 ) -> Tuple[float, float, float, float, float, float, float]:
-    """对一条轨迹做多轮 epoch；每步用 ``actor_forward``/``critic_forward``（支持 DDP 包装）。"""
+    """对一条轨迹做多轮 epoch；每步用 ``actor_forward``/``critic_forward``（支持 DDP 包装）。
+
+    self_ctx_seq: (T, P, D) 每步每 agent 的 self_ctx 表征（由 rollout 阶段收集）。
+    self_ctx_seq_mask: (T, P) bool，True=有效。
+    temporal_window: 时序窗口大小 T（0 表示不使用时序输入）。
+    """
     unwrap = model.module if hasattr(model, "module") else model
     t_max, _p = actions.shape
     order = np.arange(t_max)
+
+    # 判断是否使用时序输入
+    use_temporal = (
+        temporal_window > 1
+        and self_ctx_seq is not None
+        and self_ctx_seq_mask is not None
+    )
 
     adv_t = torch.as_tensor(advantages, dtype=torch.float32, device=device)
     ret_t = torch.as_tensor(returns, dtype=torch.float32, device=device)
@@ -102,7 +133,30 @@ def ppo_minibatch_update(
 
             for t in batch:
                 obs_t = build_obs_fn(obs_list[t], device)
-                out = unwrap.actor_forward(obs_t)
+
+                # 构建时序历史（若启用）
+                ctx_history = None
+                ctx_history_mask = None
+                if use_temporal:
+                    # 取最近 temporal_window-1 帧的历史 self_ctx
+                    t_start = max(0, t - temporal_window + 1)
+                    hist_len = t - t_start
+                    if hist_len > 0:
+                        # self_ctx_seq: (T, P, D) -> 取 [t_start:t, :, :]
+                        ctx_history = torch.as_tensor(
+                            self_ctx_seq[t_start:t], dtype=torch.float32, device=device
+                        )  # (hist_len, P, D) -> 需要转为 (P, hist_len, D)
+                        ctx_history = ctx_history.permute(1, 0, 2)  # (P, hist_len, D)
+                        ctx_history_mask = torch.as_tensor(
+                            self_ctx_seq_mask[t_start:t], dtype=torch.bool, device=device
+                        )  # (hist_len, P) -> 转为 (P, hist_len)
+                        ctx_history_mask = ctx_history_mask.permute(1, 0)
+
+                out = unwrap.actor_forward(
+                    obs_t,
+                    self_ctx_history=ctx_history,
+                    self_ctx_history_mask=ctx_history_mask,
+                )
                 probs = out["action_probs"]
                 dist = torch.distributions.Categorical(probs=probs)
                 new_logp = dist.log_prob(act_t[t])
@@ -181,4 +235,3 @@ def ppo_minibatch_update(
             f"approx_kl={approx_kl_avg:.5f} clipfrac={clipfrac_avg:.3f} ev={explained_variance:.3f} grad={grad_norm_avg:.3f}"
         )
     return pi_avg, v_avg, ent_avg, approx_kl_avg, clipfrac_avg, explained_variance, grad_norm_avg
-

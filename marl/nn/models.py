@@ -16,6 +16,7 @@ def build_actor_critic_schemes(
     num_heads: int = 4,
     pos_scale: float = 1000.0,
     device: Optional[Union[str, torch.device]] = None,
+    **kwargs,
 ) -> Dict[str, "TODCHeteroActorCritic"]:
     if schemes is None:
         requested: List[str] = ["A", "B", "C"]
@@ -40,6 +41,7 @@ def build_actor_critic_schemes(
             design_mode=key,
             num_heads=num_heads,
             pos_scale=pos_scale,
+            **kwargs,
         )
         if device is not None:
             model = model.to(device)
@@ -57,6 +59,7 @@ class TODCHeteroActorCritic(nn.Module):
         num_heads: int = 4,
         use_soft_gating: Optional[bool] = None,
         pos_scale: float = 1000.0,
+        **kwargs,
     ):
         super().__init__()
         self.model = UAVInterceptionNetwork(
@@ -65,13 +68,24 @@ class TODCHeteroActorCritic(nn.Module):
             design_mode=design_mode,
             use_soft_gating=use_soft_gating,
             pos_scale=pos_scale,
+            **kwargs,
         )
 
-    def forward(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        return self.model(obs)
+    def forward(
+        self,
+        obs: Dict[str, torch.Tensor],
+        self_ctx_history: Optional[torch.Tensor] = None,
+        self_ctx_history_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        return self.model(obs, self_ctx_history=self_ctx_history, self_ctx_history_mask=self_ctx_history_mask)
 
-    def actor_forward(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        return self.model.actor_forward(obs)
+    def actor_forward(
+        self,
+        obs: Dict[str, torch.Tensor],
+        self_ctx_history: Optional[torch.Tensor] = None,
+        self_ctx_history_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        return self.model.actor_forward(obs, self_ctx_history=self_ctx_history, self_ctx_history_mask=self_ctx_history_mask)
 
     def critic_forward(self, obs: Dict[str, torch.Tensor]) -> torch.Tensor:
         return self.model.critic_forward(obs)

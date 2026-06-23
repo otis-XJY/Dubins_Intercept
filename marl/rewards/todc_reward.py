@@ -31,7 +31,7 @@ class RewardConfig:
     step_cost: float = -0.05
     terminal_capture_bonus: float = 100.0
     terminal_asset_loss_penalty: float = 500.0
-    asset_breach_radius: float = 40.0
+    # asset_breach_radius 已移除：资产突破判定直接使用 env.collision_dist（单一真值来源）
 
     # Fallback assignment penalty (triggered when selected reward features contain -2 sentinel)
     fallback_penalty: float = 5.0

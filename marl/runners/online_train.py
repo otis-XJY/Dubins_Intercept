@@ -114,6 +114,13 @@ class TrainConfig:
     live_stream_fps_limit: float = 10.0
     # 合并进 TODCMARLEnv(config=...) 的额外项，例如 map_root、collision_dist、cap_dist（见 docs/MARL_OVERVIEW.md）
     env: Optional[Dict] = None
+    # 反事实信用分配系数（0 关闭，建议 0.05~0.2；与 GAE advantage 线性混合）
+    cf_adv_coef: float = 0.0
+    # 多帧时序注意力（P2-1）：时序窗口大小（0/1 关闭，建议 4~8）
+    temporal_window: int = 0
+    # 时序 Transformer 参数（仅 Design D 使用）
+    temporal_heads: int = 2
+    temporal_layers: int = 1
 
 
 def _suppress_stdout_if(quiet: bool):
@@ -373,6 +380,52 @@ def _build_model_obs(obs: Dict[str, np.ndarray], device: torch.device) -> Dict[s
     }
 
 
+class SelfCtxHistoryBuffer:
+    """管理每步 self_ctx 的时序历史缓存，用于 Design D 的多帧时序输入。
+
+    维护最近 temporal_window-1 帧的 self_ctx (P, D) 及其有效帧 mask (P,)。
+    每个 episode 开始时调用 reset()；每步调用 append(self_ctx)。
+    调用 get_history() 返回 (P, T-1, D) 和 (P, T-1) mask 供网络前向使用。
+    """
+
+    def __init__(self, temporal_window: int, num_pursuers: int, hidden_dim: int):
+        self.temporal_window = max(0, int(temporal_window))
+        self.num_pursuers = int(num_pursuers)
+        self.hidden_dim = int(hidden_dim)
+        # 历史帧缓存：最多 temporal_window-1 帧（当前帧由网络内部拼接）
+        self._buf: List[np.ndarray] = []
+        self._mask_buf: List[np.ndarray] = []
+
+    def reset(self):
+        self._buf.clear()
+        self._mask_buf.clear()
+
+    def append(self, self_ctx: np.ndarray):
+        """self_ctx: (P, D) 当前步的 self_ctx 表征。"""
+        # 新帧始终有效（mask 全 True）
+        self._buf.append(self_ctx.copy())
+        self._mask_buf.append(np.ones(self.num_pursuers, dtype=bool))
+        # 只保留最近 temporal_window-1 帧
+        max_hist = max(0, self.temporal_window - 1)
+        while len(self._buf) > max_hist:
+            self._buf.pop(0)
+            self._mask_buf.pop(0)
+
+    def get_history(self) -> Optional[np.ndarray]:
+        """返回历史 self_ctx 序列 (P, T-1, D) 或 None（无历史帧时）。"""
+        if len(self._buf) == 0:
+            return None
+        # (T-1, P, D) -> (P, T-1, D)
+        return np.stack(self._buf, axis=0).transpose(1, 0, 2)
+
+    def get_history_mask(self) -> Optional[np.ndarray]:
+        """返回历史 mask (P, T-1) 或 None。"""
+        if len(self._mask_buf) == 0:
+            return None
+        # (T-1, P) -> (P, T-1)
+        return np.stack(self._mask_buf, axis=0).T
+
+
 def _init_wandb(cfg: TrainConfig, schemes: Sequence[str], *, enabled: bool = True):
     if not enabled:
         return None
@@ -552,6 +605,9 @@ def train_online(cfg: TrainConfig):
         num_heads=cfg.num_heads,
         pos_scale=cfg.pos_scale,
         device=device,
+        temporal_heads=cfg.temporal_heads,
+        temporal_layers=cfg.temporal_layers,
+        temporal_window=cfg.temporal_window,
     )
 
     if dist_ctx.enabled:
@@ -742,12 +798,36 @@ def train_online(cfg: TrainConfig):
             ro_rew: List[np.ndarray] = []
             ro_val: List[np.ndarray] = []
             ro_done: List[bool] = []
+            ro_dt: List[float] = []  # 每步团队平均 delta_t_all（用于 semi-MDP 时间修正 GAE）
+            ro_cf_adv: List[np.ndarray] = []  # 每步反事实优势（P,）
+            ro_self_ctx: List[np.ndarray] = []  # 每步 self_ctx (P, D)，用于时序历史
+
+            # 时序历史缓存（Design D 多帧输入）
+            temporal_window = int(getattr(cfg, "temporal_window", 0) or 0)
+            ctx_hist_buf: Optional[SelfCtxHistoryBuffer] = None
+            if temporal_window > 1:
+                ctx_hist_buf = SelfCtxHistoryBuffer(temporal_window, env.num_P, cfg.hidden_dim)
 
             # 外层：一次 env.step(action) = 一次 RL 步；内层按 main0319：update -> step_geometry -> check。
             while (not done) and (not trunc):
                 obs_t = _build_model_obs(obs_np, device)
+
+                # 构建时序历史输入（若启用）
+                _hist = None
+                _hist_mask = None
+                if ctx_hist_buf is not None:
+                    _hist = ctx_hist_buf.get_history()
+                    _hist_mask = ctx_hist_buf.get_history_mask()
+                    if _hist is not None:
+                        _hist = torch.as_tensor(_hist, dtype=torch.float32, device=device)
+                        _hist_mask = torch.as_tensor(_hist_mask, dtype=torch.bool, device=device)
+
                 with torch.no_grad():
-                    ao = unwrap.actor_forward(obs_t)
+                    ao = unwrap.actor_forward(
+                        obs_t,
+                        self_ctx_history=_hist,
+                        self_ctx_history_mask=_hist_mask,
+                    )
                     probs = ao["action_probs"]
                     dist_cat = torch.distributions.Categorical(probs=probs)
                     actions = dist_cat.sample()
@@ -766,8 +846,24 @@ def train_online(cfg: TrainConfig):
                 ro_logp.append(logp.detach().cpu().numpy())
                 ro_rew.append(reward_vec)
                 ro_val.append(vals.detach().cpu().numpy())
+                # 收集反事实优势（仅 D 设计有此输出）
+                cf_adv_t = ao.get("cf_adv")
+                if cf_adv_t is not None:
+                    ro_cf_adv.append(cf_adv_t.detach().cpu().numpy())
+                else:
+                    ro_cf_adv.append(np.zeros(env.num_P, dtype=np.float32))
+                # 收集 self_ctx 用于时序历史（仅 D 设计有此输出）
+                self_ctx_t = ao.get("self_ctx")
+                if self_ctx_t is not None:
+                    self_ctx_np = self_ctx_t.detach().cpu().numpy()  # (P, D)
+                    ro_self_ctx.append(self_ctx_np)
+                    if ctx_hist_buf is not None:
+                        ctx_hist_buf.append(self_ctx_np)
+                else:
+                    ro_self_ctx.append(np.zeros((env.num_P, cfg.hidden_dim), dtype=np.float32))
                 step_done = bool(terms["__all__"] or truncs["__all__"])
                 ro_done.append(step_done)
+                ro_dt.append(float(np.mean([infos[f"p_{i}"]["delta_t_all"] for i in range(env.num_P)])))
 
                 ep_return += float(np.mean(reward_vec))
                 ep_steps += 1
@@ -878,10 +974,20 @@ def train_online(cfg: TrainConfig):
                     last_v,
                     gamma=cfg.gamma,
                     lam=cfg.gae_lambda,
+                    dt_seq=np.array(ro_dt, dtype=np.float32),
+                    sim_dt_ref=float(env.sim_dt),
                 )
                 adv_np = (adv_np - adv_np.mean()) / (adv_np.std() + 1e-8)
                 if cfg.advantage_clip > 0:
                     adv_np = np.clip(adv_np, -cfg.advantage_clip, cfg.advantage_clip)
+
+                # 反事实信用分配融合：adv_final = adv_gae + cf_adv_coef * A_cf
+                cf_adv_coef = float(getattr(cfg, "cf_adv_coef", 0.0) or 0.0)
+                if cf_adv_coef > 0 and len(ro_cf_adv) > 0:
+                    cf_adv_np = np.stack(ro_cf_adv, axis=0)  # (T, P)
+                    # 标准化反事实优势以匹配 GAE advantage 的尺度
+                    cf_adv_np = (cf_adv_np - cf_adv_np.mean()) / (cf_adv_np.std() + 1e-8)
+                    adv_np = adv_np + cf_adv_coef * cf_adv_np
 
                 if ep_log and cfg.algo_print:
                     print(
@@ -917,6 +1023,10 @@ def train_online(cfg: TrainConfig):
                     minibatch_size=max(1, min(cfg.ppo_minibatch_size, len(ro_obs))),
                     kl_early_stop_threshold=cfg.kl_early_stop_threshold,
                     verbose=bool(ep_log and cfg.algo_print),
+                    # P2-1：时序历史 self_ctx 序列（Design D 多帧输入）
+                    self_ctx_seq=np.stack(ro_self_ctx, axis=0) if len(ro_self_ctx) > 0 else None,
+                    self_ctx_seq_mask=np.ones((len(ro_self_ctx), env.num_P), dtype=bool) if len(ro_self_ctx) > 0 else None,
+                    temporal_window=cfg.temporal_window,
                 )
 
             if record_train_video:

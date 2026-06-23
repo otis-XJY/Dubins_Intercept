@@ -7,9 +7,11 @@ import torch.nn as nn
 
 from .actor import (
     CoordResidualHead,
+    CounterfactualQHead,
     PointerActor,
     PointwiseScoringActor,
     SelfStageScorer,
+    TemporalSelfCtxEncoder,
     postprocess_mask_and_sample,
 )
 from .attention import AllyCoordCrossAttention, HeterogeneousAttentionAB, PointsContextCrossAttention
@@ -86,7 +88,7 @@ class UAVInterceptionNetwork(nn.Module):
         design_mode: Optional[str] = None,
         use_soft_gating: Optional[bool] = None,
         pos_scale: float = 1000.0,
-        **_: Any,
+        **kwargs: Any,
     ):
         super().__init__()
         self.hidden_dim = int(hidden_dim)
@@ -111,6 +113,8 @@ class UAVInterceptionNetwork(nn.Module):
         self.coord_attn = None
         self.stage1_scorer = None
         self.coord_head = None
+        self.cf_q_head = None  # 反事实 Q_i 头（近似 COMA 信用分配）
+        self.temporal_encoder = None  # 多帧时序编码器（仅 Design D 使用）
 
         if self.design_mode == "A":
             self.fusion_a = ConcatMLPFusion8(self.hidden_dim)
@@ -132,8 +136,17 @@ class UAVInterceptionNetwork(nn.Module):
             self.coord_attn = AllyCoordCrossAttention(self.hidden_dim, self.num_heads)
             self.stage1_scorer = SelfStageScorer(self.hidden_dim)
             self.coord_head = CoordResidualHead(self.hidden_dim)
+            self.cf_q_head = CounterfactualQHead(self.hidden_dim)
             # D 的 critic 与 C 对齐：走同源 attn_ab + concat fusion，避免廉价 mean-pool 的表征失配。
             self._c_fusion_for_critic = ConcatMLPFusion8(self.hidden_dim)
+            # 多帧时序编码器：对 self_ctx 多帧序列做 Transformer 聚合
+            # temporal_window 等参数由构造器 kwargs 传入
+            self.temporal_encoder = TemporalSelfCtxEncoder(
+                hidden_dim=self.hidden_dim,
+                num_heads=int(kwargs.get("temporal_heads", 2)),
+                num_layers=int(kwargs.get("temporal_layers", 1)),
+                max_window=int(kwargs.get("temporal_window", 4)),
+            )
 
         self.critic = PermInvariantCritic(embed_dim=self.hidden_dim, hidden_dim=self.hidden_dim)
 
@@ -196,16 +209,44 @@ class UAVInterceptionNetwork(nn.Module):
         assert self._c_fusion_for_critic is not None
         return self._c_fusion_for_critic(ctx)
 
-    def _actor_forward_d(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """设计 D：阶段1 自身打分 + 阶段2 友军协同残差。"""
+    def _actor_forward_d(
+        self,
+        obs: Dict[str, torch.Tensor],
+        self_ctx_history: Optional[torch.Tensor] = None,
+        self_ctx_history_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """设计 D：阶段1 自身打分 + 阶段2 友军协同残差 + 反事实信用分配 + 可选多帧时序聚合。
+
+        self_ctx_history: (P, T, D) 最近 T 帧的 self_ctx 序列（含当前帧在最后一帧）
+        self_ctx_history_mask: (P, T) True=有效帧
+        若不提供历史帧，退化为单帧前馈（T=1，时序编码器恒等）。
+        """
         embs = self._embed(obs)
         e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a = embs
         assert self.self_ctx_fuse is not None and self.coord_attn is not None
         assert self.stage1_scorer is not None and self.coord_head is not None
+        assert self.cf_q_head is not None
 
         self_ctx = self.self_ctx_fuse(
             torch.cat([e_self.squeeze(1), e_eself.squeeze(1), e_ast_s.squeeze(1)], dim=-1)
         )  # (P, D)
+
+        # 多帧时序聚合：若提供了历史 self_ctx 序列，用 TemporalSelfCtxEncoder 聚合
+        if self_ctx_history is not None and self.temporal_encoder is not None:
+            # 将当前步 self_ctx 拼接到历史序列最后一帧
+            # self_ctx_history 形状 (P, T-1, D)，当前帧 self_ctx (P, D)
+            P = self_ctx.shape[0]
+            T_prev = self_ctx_history.shape[1]
+            current_frame = self_ctx.unsqueeze(1)  # (P, 1, D)
+            full_seq = torch.cat([self_ctx_history, current_frame], dim=1)  # (P, T, D)
+            # 构建有效帧 mask：历史帧 mask + 当前帧（始终有效）
+            current_valid = torch.ones(P, 1, dtype=torch.bool, device=self_ctx.device)
+            if self_ctx_history_mask is not None:
+                full_mask = torch.cat([self_ctx_history_mask, current_valid], dim=1)  # (P, T)
+            else:
+                # 无 mask 时假定所有历史帧有效
+                full_mask = torch.ones(P, T_prev + 1, dtype=torch.bool, device=self_ctx.device)
+            self_ctx = self.temporal_encoder(full_seq, full_mask)  # (P, D)
         logits_self = self.stage1_scorer(self_ctx, e_self_pts)  # (P, N)
 
         coord_ctx, w_coord = self.coord_attn(
@@ -221,6 +262,21 @@ class UAVInterceptionNetwork(nn.Module):
         delta = self.coord_head(e_self_pts, coord_ctx)  # (P, N)
         logits = logits_self + delta
 
+        # 反事实信用分配：Q_i(s, a_i) - Σ_a π_i(a|o_i) Q_i(s, a)
+        q_values = self.cf_q_head(self_ctx, e_self_pts)  # (P, N)
+        masked_q = q_values.masked_fill(~obs["self_pts_mask"], 0.0)
+        # 策略概率（与主 logits 同步 softmax）
+        masked_logits_for_cf = logits.masked_fill(~obs["self_pts_mask"], -1e9)
+        cf_probs = torch.softmax(masked_logits_for_cf, dim=-1)  # (P, N)
+        # 反事实基线 b_i = Σ_a π_i(a) * Q_i(s, a)
+        cf_baseline = (cf_probs * masked_q).sum(dim=-1)  # (P,)
+        # 反事实优势 A_cf_i(a_i) = Q_i(s, a_i) - b_i
+        # 在 actor 输出中不直接使用，留给 PPO 更新时与 GAE advantage 融合
+        # 选取实际动作对应的 Q 值
+        best_idx = torch.argmax(cf_probs, dim=-1)  # (P,)
+        q_selected = q_values.gather(1, best_idx.unsqueeze(-1)).squeeze(-1)  # (P,)
+        cf_adv = q_selected - cf_baseline  # (P,)
+
         masked_logits, probs, best_candidate_idx = postprocess_mask_and_sample(
             logits=logits, self_pts_mask=obs["self_pts_mask"]
         )
@@ -229,11 +285,20 @@ class UAVInterceptionNetwork(nn.Module):
             "action_probs": probs,
             "best_candidate_idx": best_candidate_idx,
             "coord_attn_weights": w_coord,
+            "cf_adv": cf_adv,  # 反事实优势，PPO 更新时可用
+            "q_values": q_values,  # 全部候选的 Q 值，PPO 更新时可用
+            "cf_baseline": cf_baseline,  # 反事实基线
+            "self_ctx": self_ctx.detach(),  # 当前步 self_ctx（供时序缓存收集）
         }
 
-    def actor_forward(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def actor_forward(
+        self,
+        obs: Dict[str, torch.Tensor],
+        self_ctx_history: Optional[torch.Tensor] = None,
+        self_ctx_history_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
         if self.design_mode == "D":
-            return self._actor_forward_d(obs)
+            return self._actor_forward_d(obs, self_ctx_history=self_ctx_history, self_ctx_history_mask=self_ctx_history_mask)
         (e_self, e_ally, e_self_pts, e_ally_pts, e_eself, e_eally, e_ast_s, e_ast_a), ctx, attn_w = self._shared_ctx(obs)
 
         w_ctx = None
@@ -289,7 +354,12 @@ class UAVInterceptionNetwork(nn.Module):
         h_global = self.global_encoder(obs)  # (D,)
         return self.critic(h_env, h_global)
 
-    def forward(self, obs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        out = self.actor_forward(obs)
+    def forward(
+        self,
+        obs: Dict[str, torch.Tensor],
+        self_ctx_history: Optional[torch.Tensor] = None,
+        self_ctx_history_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        out = self.actor_forward(obs, self_ctx_history=self_ctx_history, self_ctx_history_mask=self_ctx_history_mask)
         out["value"] = self.critic_forward(obs)
         return out

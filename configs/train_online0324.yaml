@@ -78,8 +78,8 @@ gpu_ids: 0,4
 
 # --- 同时训练的决策结构（每种结构独立 env + 模型 + 优化器）---
 schemes:
-  - Point-Wise Scoring Network     # 设计 C：逐候选点评分（主模型）
-  - Two-Stage Residual Network     # 设计 D：两段式残差协同
+  - Two-Stage Residual Network     # 设计 D：两段式残差协同 + 反事实信用分配 + 多帧时序（主模型）
+  # - Point-Wise Scoring Network   # 设计 C：逐候选点评分
   # - Concatenative Query Network  # 设计 A：拼接融合（保留兼容）
   # - Gated Query Network          # 设计 B：门控融合（保留兼容）
 
@@ -104,6 +104,15 @@ env:
   # obs:
     # ally_perception_radius: 50000.0
 
+# --- Design D 专属参数 ---
+# 反事实信用分配系数（0 关闭，建议 0.05~0.2；与 GAE advantage 线性混合）
+cf_adv_coef: 0.1
+# 多帧时序注意力（P2-1）：时序窗口大小（0/1 关闭，建议 4~8）
+temporal_window: 4
+# 时序 Transformer 参数（仅 Design D 使用）
+temporal_heads: 2
+temporal_layers: 1
+
 # --- 奖励权重（marl/rewards.py RewardConfig；仅下列字段会写入，其余键被忽略）---
 reward:
   # 拦截质量：候选特征加权（dist_v, delta_t, delta_d, delta_theta, path_l）
@@ -123,7 +132,7 @@ reward:
   step_cost: -0.1
   terminal_capture_bonus: 30.0
   terminal_asset_loss_penalty: 50.0
-  asset_breach_radius: 40.0
+  # asset_breach_radius 已移除：资产突破判定直接使用 env.collision_dist（单一真值来源）
   # 与距离进步相关的 shaping（0 为关闭）
   dist_progress_scale: 0.01
 
