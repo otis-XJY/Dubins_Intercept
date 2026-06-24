@@ -1361,6 +1361,10 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--kl-early-stop-threshold", type=float, default=0.02)
     parser.add_argument("--advantage-clip", type=float, default=5.0)
     parser.add_argument("--lr-decay", type=_str2bool, default=True)
+    parser.add_argument("--cf-adv-coef", type=float, default=0.0, help="反事实信用分配系数（0 关闭，建议 0.05~0.2；与 GAE advantage 线性混合）")
+    parser.add_argument("--temporal-window", type=int, default=0, help="多帧时序窗口大小（0/1 关闭，建议 4~8；仅 Design D）")
+    parser.add_argument("--temporal-heads", type=int, default=2, help="时序 Transformer 注意力头数（仅 Design D）")
+    parser.add_argument("--temporal-layers", type=int, default=1, help="时序 Transformer 层数（仅 Design D）")
     parser.add_argument("--reward-json", type=str, default=None, help="Inline JSON for reward config")
     parser.add_argument(
         "--env-json",
@@ -1513,6 +1517,10 @@ def _parse_args() -> TrainConfig:
         kl_early_stop_threshold=float(args.kl_early_stop_threshold),
         advantage_clip=float(args.advantage_clip),
         lr_decay=bool(args.lr_decay),
+        cf_adv_coef=float(args.cf_adv_coef),
+        temporal_window=int(args.temporal_window),
+        temporal_heads=int(args.temporal_heads),
+        temporal_layers=int(args.temporal_layers),
         reward=reward_cfg,
         env=env_cfg,
         wandb_project=args.wandb_project,
