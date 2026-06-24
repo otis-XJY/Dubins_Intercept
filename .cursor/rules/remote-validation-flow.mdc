@@ -1,0 +1,22 @@
+---
+alwaysApply: true
+---
+
+远程服务器验证流程（必须按顺序执行）：
+
+1) 本地先修复代码并保存。
+2) 本地检查变更范围：`git status --short`。
+3) 本地提交：`git add <files> && git commit -m "<message>"`。
+4) 本地推送：`git push`。
+5) 登录远程服务器后进入项目目录：`cd ~/Dubins_Intercept`。
+6) 远程拉取最新代码：`git pull`。
+7) 激活环境：`source ~/anaconda3/etc/profile.d/conda.sh && conda activate dubins`。
+8) 执行测试（优先最小复现测试，再补充完整回归）：
+   - `pytest tests/test_design_d_enhancements.py -v --tb=short`
+   - 需要时再跑相关回归用例。
+9) 记录并返回终端关键输出：Python 版本、解释器路径、通过/失败数量、失败堆栈摘要。
+10) 若远程失败，回到本地修复后重复 2-9，直到远程通过。
+
+注意：
+- 远程验证结果以“远程 pull 后运行”的结果为准。
+- 不要在远程手改业务代码；修复应在本地完成并通过 git 同步。

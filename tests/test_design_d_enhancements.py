@@ -156,7 +156,7 @@ class TestTimeCorrectedGAE:
     def test_larger_dt_produces_smaller_discount(self):
         """dt 越大折扣因子越小，GAE 优势应更短视（更重视即时奖励）。"""
         T, P = 3, 1
-        rewards = np.array([[1.0], [0.0], [0.0]], dtype=np.float32)
+        rewards = np.array([[0.0], [1.0], [0.0]], dtype=np.float32)
         values = np.zeros((T, P), dtype=np.float32)
         dones = np.zeros(T, dtype=bool)
         last_v = np.zeros(P, dtype=np.float32)
@@ -197,7 +197,7 @@ class TestCounterfactualCreditAssignment:
 
     def test_cf_adv_finite(self):
         """反事实优势应为有限值。"""
-        bsz, a, m, ma = 2, 3, 5, 4
+        bsz, a, m, ma = 2, 3, 5, 6
         model = UAVInterceptionNetwork(hidden_dim=32, num_heads=2, design_mode="D")
         obs = _fake_obs(bsz, a, m, ma)
         out = model.actor_forward(obs)
@@ -227,7 +227,7 @@ class TestCounterfactualCreditAssignment:
 
     def test_cf_adv_definition(self):
         """cf_adv = Q(s, a_selected) - baseline，其中 baseline = Σ π(a) Q(s, a)。"""
-        bsz, a, m, ma = 2, 3, 5, 4
+        bsz, a, m, ma = 2, 3, 5, 6
         model = UAVInterceptionNetwork(hidden_dim=32, num_heads=2, design_mode="D")
         obs = _fake_obs(bsz, a, m, ma)
         out = model.actor_forward(obs)
@@ -286,7 +286,7 @@ class TestTemporalSelfCtxEncoder:
 
     def test_design_d_temporal_encoder_is_identity_at_init(self):
         """TemporalSelfCtxEncoder zero-init 输出投影，初始化时应近似恒等。"""
-        bsz, a, m, ma = 2, 3, 5, 4
+        bsz, a, m, ma = 2, 3, 5, 6
         D = 32
         model = UAVInterceptionNetwork(
             hidden_dim=D, num_heads=2, design_mode="D",
@@ -345,7 +345,7 @@ class TestTemporalSelfCtxEncoder:
 
     def test_design_d_self_ctx_detached(self):
         """输出的 self_ctx 应是 detached 的（不参与梯度回传）。"""
-        bsz, a, m, ma = 2, 3, 5, 4
+        bsz, a, m, ma = 2, 3, 5, 6
         model = UAVInterceptionNetwork(hidden_dim=32, num_heads=2, design_mode="D")
         obs = _fake_obs(bsz, a, m, ma)
         out = model.actor_forward(obs)
@@ -353,7 +353,7 @@ class TestTemporalSelfCtxEncoder:
 
     def test_design_d_without_temporal_params(self):
         """Design D 不传 temporal 参数时也应正常工作（使用默认值）。"""
-        bsz, a, m, ma = 2, 3, 5, 4
+        bsz, a, m, ma = 2, 3, 5, 6
         model = UAVInterceptionNetwork(hidden_dim=32, num_heads=2, design_mode="D")
         obs = _fake_obs(bsz, a, m, ma)
         # 不传 temporal 参数，temporal_encoder 仍会创建（默认 window=4）
@@ -464,7 +464,7 @@ class TestBuildWithTemporalKwargs:
         assert model.model.temporal_encoder is not None
 
         # 验证模型可前向传播
-        obs = _fake_obs(2, 3, 5, 4)
+        obs = _fake_obs(2, 3, 5, 6)
         out = model(obs)
         assert "action_probs" in out
         assert "self_ctx" in out
