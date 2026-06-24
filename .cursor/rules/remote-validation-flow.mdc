@@ -8,15 +8,25 @@ alwaysApply: true
 2) 本地检查变更范围：`git status --short`。
 3) 本地提交：`git add <files> && git commit -m "<message>"`。
 4) 本地推送：`git push`。
-5) 登录远程服务器后进入项目目录：`cd ~/Dubins_Intercept`。
-6) 远程拉取最新代码：`git pull`。
-7) 激活环境：`source ~/anaconda3/etc/profile.d/conda.sh && conda activate dubins`。
-8) 执行测试（优先最小复现测试，再补充完整回归）：
+5) 远程服务器：`ssh xujunyi@210.75.240.143`。
+6) 密码为：`xujunyi@123`。
+7) 为避免等待密码输入导致卡住，优先使用非交互方式输入密码（推荐 `expect`）；若需复用连接，先建立 `ControlMaster`，后续命令走 `ControlPath` 免重复输入密码。
+8) 登录远程服务器后进入项目目录：`cd ~/Dubins_Intercept`。
+9) 远程拉取最新代码：`git pull`。
+10) 激活环境：`source ~/anaconda3/etc/profile.d/conda.sh && conda activate dubins`。
+11) 无显示环境必须设置：`export MPLBACKEND=Agg`。
+12) 执行测试（优先最小复现测试，再补充相关回归）：
    - `pytest tests/test_design_d_enhancements.py -v --tb=short`
-   - 需要时再跑相关回归用例。
-9) 记录并返回终端关键输出：Python 版本、解释器路径、通过/失败数量、失败堆栈摘要。
-10) 若远程失败，回到本地修复后重复 2-9，直到远程通过。
+   - 需要时再跑：`pytest tests/test_train_online_smoke.py -v --tb=short`
+13) 若需远程短训观察日志，使用 `python -u` 或 `export PYTHONUNBUFFERED=1`，避免 stdout 全缓冲导致日志长时间不刷新。
+14) 记录并返回终端关键输出：Python 版本、解释器路径、通过/失败数量、失败堆栈摘要。
+15) 若远程失败，回到本地修复后重复 2-14，直到远程通过。
+16) 完成测试后，合并相关的 commit，不要有过多的碎 commit：
+    - 用 `git rebase -i HEAD~N`（N 为本次相关 commit 数）将本次修改的多个 commit 合并为一个语义完整的 commit。
+    - 合并时保留最终清晰的 commit message（中文，概括本次修改的核心内容）。
+    - 合并后 `git push --force-with-lease` 推送（仅限非主干分支或确认安全时）。
 
 注意：
-- 远程验证结果以“远程 pull 后运行”的结果为准。
+- 远程验证结果以"远程 pull 后运行"的结果为准。
 - 不要在远程手改业务代码；修复应在本地完成并通过 git 同步。
+- 若 SSH 配置中有跳板机，优先使用可直连目标机的配置，避免在跳板机认证阶段阻塞。

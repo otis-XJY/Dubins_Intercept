@@ -61,7 +61,7 @@ lr_decay: true                  # 线性衰减学习率到初始值的 10%
 hidden_dim: 128
 num_heads: 4
 # 相对坐标的位置/距离尺度归一化常数（embeddings 内对 rel_x/rel_y/r 及候选点 Delta_d/path_L 除以此值）
-pos_scale: 1000.0
+pos_scale: 1000.0 
 
 # --- 设备与多卡 ---
 # 例如 cuda:0；无 GPU 时用 cpu。若写 cuda 但机器无 CUDA，训练脚本会直接报错（不静默降级）
