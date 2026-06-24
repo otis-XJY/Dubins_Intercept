@@ -79,14 +79,15 @@ def test_capture_is_geometric_not_assignment():
 
     # 调用捕获检查
     print("\n[TEST] 调用 _update_capflag_full_from_geometry ...")
-    newly = env._update_capflag_full_from_geometry()
+    newly, mismatch = env._update_capflag_full_from_geometry()
 
-    print(f"[TEST] 新增捕获数: {newly}")
+    print(f"[TEST] 新增捕获数: {newly}, 非匹配捕获数: {mismatch}")
     print(f"[TEST] Capflag_full: {env.Capflag_full.tolist()}")
 
     # 验证：eid=0 被 pid=1（非分配的 pid=0）捕获
     assert env.Capflag_full[0] == True, "eid=0 应被捕获"
     assert newly == 1, f"应捕获 1 个，实际 {newly}"
+    assert mismatch == 1, f"应非匹配捕获 1 个，实际 {mismatch}"
 
     # 验证 assigned_eid_full：pid=0 的 assigned 被清除（eid=0 被捕获）
     print(f"[TEST] assigned_eid_full: {env.assigned_eid_full.tolist()}")

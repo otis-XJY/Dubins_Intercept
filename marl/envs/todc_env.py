@@ -491,7 +491,7 @@ class TODCMARLEnv(gym.Env):
                 self._sync_assigned_eid_full_from_pairs()
                 self._validate_pair_data_integrity(context="reset:post_replan")
                 break
-            self._update_capflag_full_from_geometry()
+            self._update_capflag_full_from_geometry()  # reset 阶段不处理非匹配重规划
 
         if self._inferred_targets_e is None:
             inferred, _ = self._predict_facility_ranks_for_e()
@@ -536,6 +536,9 @@ class TODCMARLEnv(gym.Env):
         stats = StepStats(replanned=False, collision=False, captured=0)
         delta_t_all = 0.0
 
+        # 本 step 内非匹配捕获的 eid 集合，用于区分奖励
+        step_mismatch_capture_eids: set = set()
+
         if self.Capflag_full is None:
             raise RuntimeError("Capflag_full is None; reset() must be called before step().")
         prev_cap_full = self.Capflag_full.copy()
@@ -568,10 +571,23 @@ class TODCMARLEnv(gym.Env):
                 self._validate_pair_data_integrity(context="step:post_replan")
                 stats.replanned = True
                 break
-            self._update_capflag_full_from_geometry()
+            _newly, _mismatch = self._update_capflag_full_from_geometry()
+            if _mismatch > 0:
+                # 非匹配捕获发生：分配关系已被打破，立即重规划以重新分配剩余追捕者
+                step_mismatch_capture_eids |= self._last_mismatch_capture_eids
+                with _suppress_stdout_if(not self._planner_print):
+                    flagAllfallback = self._compute_isomap_intercept_candidates()
+                    self._apply_hungarian_and_paths(flagAllfallback)
+                self._sync_assigned_eid_full_from_pairs()
+                self._validate_pair_data_integrity(context="step:post_mismatch_capture_replan")
+                stats.replanned = True
+                break
 
         captured_delta_full = int(np.sum(self.Capflag_full) - np.sum(prev_cap_full))
         stats.captured = int(captured_delta_full)
+        # 匹配捕获数 = 总捕获 - 非匹配捕获
+        mismatch_captured = len(step_mismatch_capture_eids)
+        matched_captured = max(0, captured_delta_full - mismatch_captured)
         self.decision_step += 1
         self.episode_step += 1
         delta_t_all = float(self.t_all) - t_all_before
@@ -587,6 +603,7 @@ class TODCMARLEnv(gym.Env):
             asset_breached=asset_breached,
             details=reward_details,
             debug_print=self._debug_print,
+            matched_captured=matched_captured,
         )
 
         max_t = float(self.length_E_max) / float(self.v_E)
@@ -1310,8 +1327,13 @@ class TODCMARLEnv(gym.Env):
                     f"[{context}] PosE rows {self.PosE.shape[0]} < UnCapEidNew size {self.UnCapEidNew.size}"
                 )
 
-    def _update_capflag_full_from_geometry(self) -> int:
-        """更新全局捕获标记 Capflag_full（单调置 True）。返回本次新增捕获数量。"""
+    def _update_capflag_full_from_geometry(self) -> Tuple[int, int]:
+        """更新全局捕获标记 Capflag_full（单调置 True）。
+
+        返回 (newly, mismatch_count)：
+        - newly: 本次新增捕获总数
+        - mismatch_count: 其中非匹配捕获数（捕获者 != 分配者）
+        """
         if self.Capflag_full is None:
             self.Capflag_full = np.zeros((self.num_E,), dtype=bool)
         if self.Capflag_full.shape != (self.num_E,):
@@ -1319,11 +1341,14 @@ class TODCMARLEnv(gym.Env):
         cap_dist = float(self.CapRef["CapDist"])
         cap_angle_half = float(self.CapRef["CapAngle"]) / 2.0
         newly = 0
+        mismatch_count = 0
+        # 本轮非匹配捕获的 eid 列表，供 reward 区分匹配/非匹配捕获
+        self._last_mismatch_capture_eids: set = set()
         # Only check alive eids in current compact set to avoid useless scans.
         alive_eids = np.asarray(self.UnCapEidNew, dtype=np.int64).ravel()
         alive_pids = np.asarray(self.UnCapPidNew, dtype=np.int64).ravel()
         if alive_eids.size == 0 or alive_pids.size == 0:
-            return 0
+            return 0, 0
         # Pre-fetch pursuer poses (compact rows correspond to alive_pids order).
         p_xyth = np.asarray(self.PosP, dtype=float)
         if p_xyth.ndim != 2 or p_xyth.shape[0] != alive_pids.size or p_xyth.shape[1] < 3:
@@ -1359,6 +1384,8 @@ class TODCMARLEnv(gym.Env):
                     if match.size > 0:
                         assigned_pid = int(self.pairs_realE2P[match[0], 1])
                 if assigned_pid >= 0 and cap_pid != assigned_pid:
+                    mismatch_count += 1
+                    self._last_mismatch_capture_eids.add(eid)
                     print(f"[CAPTURE] WARNING: evader {eid} captured by pursuer {cap_pid} "
                           f"(NOT assigned pursuer {assigned_pid}), d={float(d[j]):.1f}, ang={float(angle_diff):.1f}°")
                 else:
@@ -1368,7 +1395,7 @@ class TODCMARLEnv(gym.Env):
                 if self.assigned_eid_full is not None:
                     self.assigned_eid_full = np.asarray(self.assigned_eid_full, dtype=np.int64)
                     self.assigned_eid_full[self.assigned_eid_full == eid] = -1
-        return int(newly)
+        return int(newly), int(mismatch_count)
 
     def _compute_curr_min_dist_stable(self) -> np.ndarray:
         """稳定距离：每个全局 pursuer 到其 assigned_eid_full 的距离；无效则 inf。shape=(num_P,)"""

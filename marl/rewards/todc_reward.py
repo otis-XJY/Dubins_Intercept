@@ -252,11 +252,22 @@ class TODCRewardFunction:
         asset_breached: bool,
         details: Optional[Dict[str, dict]] = None,
         debug_print: bool = False,
+        matched_captured: int = 0,
     ):
+        """应用终端奖励。
+
+        匹配捕获给全额 terminal_capture_bonus，非匹配捕获给半额。
+        matched_captured 为匹配捕获数，captured_delta - matched_captured 为非匹配捕获数。
+        """
         terminal_bonus = 0.0
         terminal_penalty = 0.0
         if captured_delta > 0:
-            terminal_bonus = float(self.config.terminal_capture_bonus) * float(captured_delta) / max(1, int(num_e))
+            mismatch_captured = max(0, captured_delta - matched_captured)
+            # 匹配捕获给全额，非匹配捕获给半额
+            bonus_total = float(self.config.terminal_capture_bonus) * (
+                float(matched_captured) + 0.5 * float(mismatch_captured)
+            ) / max(1, int(num_e))
+            terminal_bonus = bonus_total
             for k in rewards:
                 rewards[k] += terminal_bonus
                 if details is not None:
@@ -275,6 +286,6 @@ class TODCRewardFunction:
         if debug_print and (terminal_bonus != 0.0 or terminal_penalty != 0.0):
             print(
                 f"[REWARD] terminal_bonus={terminal_bonus:.4f} terminal_penalty={terminal_penalty:.4f} "
-                f"(captured_delta={captured_delta}, asset_breached={asset_breached})"
+                f"(captured_delta={captured_delta}, matched={matched_captured}, asset_breached={asset_breached})"
             )
 

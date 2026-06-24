@@ -71,12 +71,23 @@ def obtainPE2IsoPath(PosP, PIsoPos, Map, v):
             final_pathP2Iso_segments[i] = ('straight', np.vstack([xs, ys, thetas]))
             continue
 
-        # 超时检查：若已超过截止时间则跳过剩余代理
+        # 超时检查：若已超过截止时间则剩余代理使用直线兜底
+        # 注意：必须从 i 开始（包含当前代理），否则 final_pathP2Iso_segments[i] 非 None
+        # 但 vthetaAllP2Iso[i] 仍为 None，导致 obtainPath 崩溃
         if time.monotonic() > deadline:
-            print(f'[等时面路径] 规划超时，已完成 {i+1}/{num_agents} 个代理')
-            for j in range(i + 1, num_agents):
-                final_pathP2Iso_segments[j] = None
-                vthetaAllP2Iso[j] = np.array([])
+            print(f'[等时面路径] 规划超时，已完成 {i}/{num_agents} 个代理，剩余使用直线兜底')
+            for j in range(i, num_agents):
+                sx, sy = PosP[j, 0], PosP[j, 1]
+                ex, ey = PIsoPos[j, 0], PIsoPos[j, 1]
+                dx, dy = ex - sx, ey - sy
+                dist = np.sqrt(dx**2 + dy**2)
+                direction = np.arctan2(dy, dx)
+                n_pts = max(int(np.ceil(dist / step_size)) + 1, 2)
+                xs = np.linspace(sx, ex, n_pts, dtype=np.float32)
+                ys = np.linspace(sy, ey, n_pts, dtype=np.float32)
+                thetas = np.full(n_pts, direction, dtype=np.float32)
+                vthetaAllP2Iso[j] = thetas
+                final_pathP2Iso_segments[j] = ('straight', np.vstack([xs, ys, thetas]))
             break
 
         # 提取并展平 vtheta_all (速度角集合)

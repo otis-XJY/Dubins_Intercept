@@ -44,7 +44,7 @@ def main():
     env.assigned_eid_full[1] = 1
     env.last_min_dist_stable = np.full((env.num_P,), np.inf, dtype=np.float32)
 
-    newly1 = env._update_capflag_full_from_geometry()
+    newly1, _ = env._update_capflag_full_from_geometry()
     if int(np.sum(env.Capflag_full)) != 1 or newly1 != 1:
         raise AssertionError(f"Expected captured_total_full=1 newly=1, got sum={np.sum(env.Capflag_full)} newly={newly1}")
 
@@ -58,7 +58,7 @@ def main():
 
     # Step 2: move eid=1 near pid=1 to force second capture.
     env.PosE = np.array([[1.0, 0.0, 0.0], [1001.0, 0.0, 0.0]], dtype=float)
-    newly2 = env._update_capflag_full_from_geometry()
+    newly2, _ = env._update_capflag_full_from_geometry()
     if int(np.sum(env.Capflag_full)) != 2 or newly2 != 1:
         raise AssertionError(f"Expected captured_total_full=2 newly=1, got sum={np.sum(env.Capflag_full)} newly={newly2}")
 

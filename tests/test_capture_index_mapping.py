@@ -180,8 +180,8 @@ def test_step_forced_single_capture_keeps_posp_pose_mapping():
                 did_capture["done"] = True
                 prev = bool(env.Capflag_full[eid])
                 env.Capflag_full[eid] = True
-                return 0 if prev else 1
-        return 0
+                return (0 if prev else 1), 0  # (newly, mismatch_count)
+        return 0, 0
 
     env._update_capflag_full_from_geometry = _forced_single_capture_full  # type: ignore[assignment]
 
