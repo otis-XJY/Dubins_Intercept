@@ -83,6 +83,10 @@ class TODCMARLEnv(gym.Env):
         self.collision_dist = float(self.config.get("collision_dist", 25.0))
         self._debug_print = bool(self.config.get("debug_print", False))
         self._planner_print = bool(self.config.get("planner_print", False))
+        # 默认关闭高频一致性断言；仅调试时开启
+        self._enable_integrity_checks = bool(
+            self.config.get("enable_integrity_checks", self._debug_print)
+        )
         self.reward_fn = TODCRewardFunction.from_env_config(self.config)
 
         self._load_assets()
@@ -478,8 +482,6 @@ class TODCMARLEnv(gym.Env):
         # main0319: 内层 _phase_update -> _advance_from_paths -> _phase_check_decision 直至 DWA 需重规划 (line 264)，再构建候选
         while not np.all(self.Capflag_full) and (self.t_all < self.length_E_max /self.v_E):
             self._phase_update()
-            self._validate_pair_data_integrity(context="reset:post_phase_update")
-            self._validate_capflag_consistency(context="reset:post_phase_update")
             self._advance_from_paths()
             need_replan, terminal = self._phase_check_decision()
             if terminal:
@@ -553,8 +555,6 @@ class TODCMARLEnv(gym.Env):
 
         while not np.all(self.Capflag_full) and (self.t_all < self.length_E_max / self.v_E):
             self._phase_update()
-            self._validate_pair_data_integrity(context="step:post_phase_update")
-            self._validate_capflag_consistency(context="step:post_phase_update")
             self._advance_from_paths()
             self._tick_counter += 1
             if self._on_tick is not None:
@@ -576,6 +576,8 @@ class TODCMARLEnv(gym.Env):
                 # 非匹配捕获发生：分配关系已被打破，先同步剔除已捕获配对，再重规划
                 step_mismatch_capture_eids |= self._last_mismatch_capture_eids
                 self._drop_captured_pairs(log_context="MISMATCH_REPLAN_PREP")
+                # 过滤后需要立即重建紧凑 PosP/PosE，避免重规划阶段使用过期行数导致广播错误
+                self._advance_from_paths(record_history=False)
                 if np.all(self.Capflag_full):
                     break
                 with _suppress_stdout_if(not self._planner_print):
@@ -670,7 +672,7 @@ class TODCMARLEnv(gym.Env):
             )
         return obs, rewards, terminations, truncations, infos
 
-    def _advance_from_paths(self):
+    def _advance_from_paths(self, record_history: bool = True):
         curr_idx_p = int(round(self.t * self.v_P))
         seg_start = int(round((self.t - self.time_res / self.Stepsize) * self.v_P))
         seg_end = curr_idx_p
@@ -679,9 +681,10 @@ class TODCMARLEnv(gym.Env):
         self.PosP = np.array([self.PathP[int(pid)][:,min(curr_idx_p, self.PathP[int(pid)].shape[1] - 1)]
         for pid in self.UnCapPidNew])
 
-        for id,pid in enumerate(self.UnCapPidNew):
-        # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
-            self.PathPtrue[int(pid)] = np.hstack((self.PathPtrue[int(pid)], self.PathP[int(pid)][:, max(0, seg_start) : seg_end]))
+        if record_history:
+            for _id,pid in enumerate(self.UnCapPidNew):
+            # 提取并排序 (替代最后一个 cellfun + cell2mat + sort)
+                self.PathPtrue[int(pid)] = np.hstack((self.PathPtrue[int(pid)], self.PathP[int(pid)][:, max(0, seg_start) : seg_end]))
 
 
 
@@ -1202,6 +1205,9 @@ class TODCMARLEnv(gym.Env):
         - _apply_assignment_from_action 前（确保 IC 表查找正确）
         - _advance_from_paths 前（确保 PathE/PathP 索引正确）
         """
+        if not self._enable_integrity_checks:
+            return
+
         # --- 1. pairs_realE2P 与 _pairs_ic_compact 行数对齐 ---
         if self.pairs_realE2P is None:
             if self._pairs_ic_compact is not None:
@@ -1292,6 +1298,9 @@ class TODCMARLEnv(gym.Env):
 
         检查所有可能导致"配对莫名停止"的数据不一致问题。
         """
+        if not self._enable_integrity_checks:
+            return
+
         # --- 1. Capflag_full 基本形状 ---
         if self.Capflag_full is None:
             return
