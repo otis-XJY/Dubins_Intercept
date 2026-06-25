@@ -573,8 +573,11 @@ class TODCMARLEnv(gym.Env):
                 break
             _newly, _mismatch = self._update_capflag_full_from_geometry()
             if _mismatch > 0:
-                # 非匹配捕获发生：分配关系已被打破，立即重规划以重新分配剩余追捕者
+                # 非匹配捕获发生：分配关系已被打破，先同步剔除已捕获配对，再重规划
                 step_mismatch_capture_eids |= self._last_mismatch_capture_eids
+                self._drop_captured_pairs(log_context="MISMATCH_REPLAN_PREP")
+                if np.all(self.Capflag_full):
+                    break
                 with _suppress_stdout_if(not self._planner_print):
                     flagAllfallback = self._compute_isomap_intercept_candidates()
                     self._apply_hungarian_and_paths(flagAllfallback)
@@ -1097,25 +1100,44 @@ class TODCMARLEnv(gym.Env):
 
     # --- main0319 内层单步分解：update -> _advance_from_paths -> check（Gym 的 step(action) 仍是对外 RL 接口）---
 
+    def _drop_captured_pairs(self, log_context: str) -> int:
+        """按 Capflag_full 过滤已捕获配对，并同步 UnCap*New 与 assigned_eid_full。"""
+        if self.Capflag_full is None:
+            raise RuntimeError("Capflag_full is None; reset() must be called before filtering pairs.")
+        if self.pairs_realE2P is None or self.pairs_realE2P.size == 0:
+            return 0
+        if self._pairs_ic_compact is None:
+            raise ValueError("_pairs_ic_compact is None but pairs_realE2P is not")
+
+        pr = np.asarray(self.pairs_realE2P, dtype=np.int64)
+        pic = np.asarray(self._pairs_ic_compact, dtype=np.int64)
+        if pr.shape[0] != pic.shape[0]:
+            raise ValueError(
+                f"{log_context}: row count mismatch pairs_realE2P={pr.shape[0]} vs _pairs_ic_compact={pic.shape[0]}"
+            )
+
+        global_eids = np.asarray(pr[:, 0], dtype=np.int64)
+        keep = ~np.asarray(self.Capflag_full, dtype=bool)[global_eids]
+        n_dropped = int(np.sum(~keep))
+        if n_dropped > 0:
+            dropped_pairs = pr[~keep]
+            for dp in dropped_pairs:
+                print(f"[{log_context}] t_all={self.t_all:.3f} 过滤已捕获配对: "
+                      f"eid={int(dp[0])}, pid={int(dp[1])}")
+
+        self.UnCapPidNew = pr[keep, 1].astype(int)
+        self.UnCapEidNew = pr[keep, 0].astype(int)
+        self.pairs_realE2P = pr[keep]
+        self._pairs_ic_compact = pic[keep]
+        self._sync_assigned_eid_full_from_pairs()
+        return n_dropped
+
     def _phase_update(self) -> None:
         """main0319:204-216 — 时间推进并同步未捕获 E-P 配对。"""
         dt = self.sim_dt
         self.t += dt
         self.t_all += dt
-        if self.pairs_realE2P is not None and self.pairs_realE2P.size > 0:
-            global_eids = np.asarray(self.pairs_realE2P[:, 0], dtype=np.int64)
-            keep = ~np.asarray(self.Capflag_full, dtype=bool)[global_eids]
-            n_dropped = int(np.sum(~keep))
-            if n_dropped > 0:
-                dropped_pairs = self.pairs_realE2P[~keep]
-                for dp in dropped_pairs:
-                    print(f"[PHASE_UPDATE] t_all={self.t_all:.3f} 过滤已捕获配对: "
-                          f"eid={int(dp[0])}, pid={int(dp[1])}")
-            self.UnCapPidNew = self.pairs_realE2P[keep, 1].astype(int)
-            self.UnCapEidNew = self.pairs_realE2P[keep, 0].astype(int)
-            self.pairs_realE2P = self.pairs_realE2P[keep]
-            self._pairs_ic_compact = self._pairs_ic_compact[keep]
-            self._sync_assigned_eid_full_from_pairs()
+        self._drop_captured_pairs(log_context="PHASE_UPDATE")
 
 
     def _phase_check_decision(self) -> Tuple[bool, bool]:
