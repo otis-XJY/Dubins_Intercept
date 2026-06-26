@@ -32,6 +32,7 @@ import tempfile
 
 from marl import TODCMARLEnv, build_actor_critic_schemes
 from marl.rl.mappo import compute_gae, ppo_minibatch_update
+from marl.rl.warm_start import run_rule_bc_warm_start
 
 
 @dataclass
@@ -121,6 +122,11 @@ class TrainConfig:
     # 时序 Transformer 参数（仅 Design D 使用）
     temporal_heads: int = 2
     temporal_layers: int = 1
+    # 离线 warm-start（规则策略行为克隆预热）
+    warm_start_enable: bool = False
+    warm_start_episodes: int = 0
+    warm_start_rollout_steps: int = 0
+    warm_start_minibatch_size: int = 32
 
 
 def _suppress_stdout_if(quiet: bool):
@@ -669,6 +675,20 @@ def train_online(cfg: TrainConfig):
             _todc_marl_env_dict(cfg, render_mode="rgb_array" if need_train_rgb else "none")
         )
         opts[scheme_name] = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+
+    # 离线 warm-start：规则策略生成标签，先做行为克隆预热，再进入 on-policy MAPPO。
+    run_rule_bc_warm_start(
+        cfg=cfg,
+        models=models,
+        envs=envs,
+        opts=opts,
+        device=device,
+        build_obs_fn=_build_model_obs,
+        run=run,
+        is_main=dist_ctx.is_main,
+        rl_print=bool(cfg.rl_print),
+    )
+
     # 学习率调度器：线性衰减到初始 LR 的 10%
     schedulers: Dict[str, torch.optim.lr_scheduler.LRScheduler] = {}
     if cfg.lr_decay:
@@ -1365,6 +1385,10 @@ def _build_parser(defaults: Optional[Dict] = None) -> argparse.ArgumentParser:
     parser.add_argument("--temporal-window", type=int, default=0, help="多帧时序窗口大小（0/1 关闭，建议 4~8；仅 Design D）")
     parser.add_argument("--temporal-heads", type=int, default=2, help="时序 Transformer 注意力头数（仅 Design D）")
     parser.add_argument("--temporal-layers", type=int, default=1, help="时序 Transformer 层数（仅 Design D）")
+    parser.add_argument("--warm-start-enable", type=_str2bool, default=False, help="启用规则策略行为克隆 warm-start 预热")
+    parser.add_argument("--warm-start-episodes", type=int, default=0, help="warm-start 预热回合数（每个 scheme）")
+    parser.add_argument("--warm-start-rollout-steps", type=int, default=0, help="warm-start 每回合采样步数上限（0 表示使用 max_episode_steps）")
+    parser.add_argument("--warm-start-minibatch-size", type=int, default=32, help="warm-start 行为克隆的小批量大小")
     parser.add_argument("--reward-json", type=str, default=None, help="Inline JSON for reward config")
     parser.add_argument(
         "--env-json",
@@ -1521,6 +1545,10 @@ def _parse_args() -> TrainConfig:
         temporal_window=int(args.temporal_window),
         temporal_heads=int(args.temporal_heads),
         temporal_layers=int(args.temporal_layers),
+        warm_start_enable=bool(args.warm_start_enable),
+        warm_start_episodes=int(args.warm_start_episodes),
+        warm_start_rollout_steps=int(args.warm_start_rollout_steps),
+        warm_start_minibatch_size=int(args.warm_start_minibatch_size),
         reward=reward_cfg,
         env=env_cfg,
         wandb_project=args.wandb_project,

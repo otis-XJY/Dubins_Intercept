@@ -113,6 +113,16 @@ temporal_window: 4
 temporal_heads: 2
 temporal_layers: 1
 
+# --- 离线 warm-start（规则策略行为克隆预热）---
+# true 时先用规则策略（基于 obtainCost 构造的 reward_nodes）生成标签做 BC 预热，再切 MAPPO
+warm_start_enable: false
+# 每个 scheme 的 warm-start 预热回合数（0 关闭）
+warm_start_episodes: 0
+# 每个 warm-start 回合采样步数上限（0 表示复用 max_episode_steps）
+warm_start_rollout_steps: 0
+# warm-start 的 BC 小批量大小
+warm_start_minibatch_size: 32
+
 # --- 奖励权重（marl/rewards.py RewardConfig；仅下列字段会写入，其余键被忽略）---
 reward:
   # 拦截质量：候选特征加权（dist_v, delta_t, delta_d, delta_theta, path_l）
