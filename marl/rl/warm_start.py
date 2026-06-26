@@ -66,6 +66,53 @@ class SelfCtxHistoryBuffer:
 _COLS = CandidateColumns()
 
 
+def _ic_row_to_obs_node(env: TODCMARLEnv, row: np.ndarray, pid: int) -> Optional[np.ndarray]:
+    """把 IC 候选行映射为与 self_pts 对齐的 8 维节点。"""
+    if row.ndim != 1 or row.shape[0] <= _COLS.Delta_V:
+        return None
+    c_x, c_y, theta = env._extract_candidate_pos(row, int(pid))
+    return np.asarray(
+        [
+            float(c_x),
+            float(c_y),
+            float(theta),
+            float(row[_COLS.Delta_t]),
+            float(row[_COLS.Delta_d]),
+            float(row[_COLS.Delta_theta]),
+            float(row[_COLS.path_L]),
+            float(row[_COLS.Delta_V]),
+        ],
+        dtype=np.float32,
+    )
+
+
+def _match_obs_index_for_ic_row(
+    env: TODCMARLEnv,
+    row: np.ndarray,
+    pid: int,
+    self_pts_row: np.ndarray,
+    mask_row: np.ndarray,
+) -> int:
+    """在某个 P 的 obs 子集中定位指定 IC 行对应的离散动作索引。"""
+    k_valid = np.where(mask_row)[0]
+    if k_valid.size == 0:
+        return -1
+
+    tgt = _ic_row_to_obs_node(env, row, pid)
+    if tgt is None:
+        return int(k_valid[0])
+
+    sub = np.asarray(self_pts_row[k_valid], dtype=np.float32)
+    # 与观测生成器一致：节点包含 [x,y,theta,delta_t,delta_d,delta_theta,path_l,distance_V]
+    diff = np.abs(sub - tgt[None, :])
+    # theta 是周期变量，采用最短角距离，避免 ±pi 跳变导致错配。
+    d_theta = sub[:, 2] - float(tgt[2])
+    diff[:, 2] = np.abs(np.arctan2(np.sin(d_theta), np.cos(d_theta)))
+
+    score = np.sum(diff, axis=1)
+    return int(k_valid[np.argmin(score)])
+
+
 def _rule_actions_from_hungarian(
     obs_np: Dict[str, np.ndarray],
     env: TODCMARLEnv,
@@ -190,20 +237,15 @@ def _rule_actions_from_hungarian(
         hung_row = hung_compact_map.get(compact)
         if hung_row is None:
             continue
-        # 在 obs 子集中找到匹配行：比较候选点坐标 (x,y) 与 theta
-        # self_pts[p, k] = [c_x, c_y, theta, delta_t, delta_d, delta_theta, path_l, distance_V]
-        target_x = float(ic_candidates[hung_row, 0])
-        target_y = float(ic_candidates[hung_row, 1])
-        # 匹配条件：距离最近
-        k_valid = np.where(mask[p])[0]
-        if len(k_valid) == 0:
-            continue
-        dists = np.sqrt(
-            (self_pts[p, k_valid, 0] - target_x) ** 2
-            + (self_pts[p, k_valid, 1] - target_y) ** 2
+        best_k = _match_obs_index_for_ic_row(
+            env=env,
+            row=ic_candidates[hung_row],
+            pid=p,
+            self_pts_row=self_pts[p],
+            mask_row=mask[p],
         )
-        best_k = k_valid[np.argmin(dists)]
-        rule_idx[p] = int(best_k)
+        if best_k >= 0:
+            rule_idx[p] = int(best_k)
 
     # ── 第 4 步：未被匈牙利覆盖的 P，取 obs 子集内 lexsort 最优 ──
     for p in range(num_P):
