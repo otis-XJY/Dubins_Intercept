@@ -199,6 +199,7 @@ def main():
     sum_dt_err_new = 0.0
 
     for ep in range(n_ep):
+        print(f"[EP {ep+1}/{n_ep}] starting ...", flush=True)
         obs_np, _ = env.reset()
         done = False
         trunc = False
@@ -329,6 +330,7 @@ def main():
             done = bool(terms["__all__"])
             trunc = bool(truncs["__all__"])
             step += 1
+        print(f"[EP {ep+1}/{n_ep}] done, steps={step}, P_assigned={total_p_assigned}", flush=True)
 
     # ── 汇总 ──
     print("=" * 70)
