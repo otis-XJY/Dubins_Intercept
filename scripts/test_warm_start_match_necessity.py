@@ -44,10 +44,17 @@ def _match_obs_index_xy_only(
 
 
 # ── New：8 维特征匹配 + 角度周期 ──
-def _ic_row_to_obs_node(env, row, pid):
+def _ic_row_to_obs_node(env, row, pid, pos_p=None):
     if row.ndim != 1 or row.shape[0] <= _COLS.Delta_V:
         return None
-    c_x, c_y, theta = env._extract_candidate_pos(row, int(pid))
+    c_x, c_y, _raw_theta = env._extract_candidate_pos(row, int(pid))
+    # 与 obs 生成器 _build_c_nodes 一致：theta = arctan2(vec_y, vec_x)
+    if pos_p is not None:
+        p_x, p_y, p_th = float(pos_p[pid, 0]), float(pos_p[pid, 1]), float(pos_p[pid, 2])
+        vec_x, vec_y = c_x - p_x, c_y - p_y
+        theta = float(np.arctan2(vec_y, vec_x)) if (abs(vec_x) + abs(vec_y)) > 1e-9 else p_th
+    else:
+        theta = float(_raw_theta)
     return np.asarray(
         [
             float(c_x), float(c_y), float(theta),
@@ -67,13 +74,14 @@ def _match_obs_index_8d(
     pid: int,
     self_pts_row: np.ndarray,
     mask_row: np.ndarray,
+    pos_p=None,
 ) -> int:
     """8 维特征匹配，theta 用最短角距离。"""
     k_valid = np.where(mask_row)[0]
     if k_valid.size == 0:
         return -1
 
-    tgt = _ic_row_to_obs_node(env, row, pid)
+    tgt = _ic_row_to_obs_node(env, row, pid, pos_p=pos_p)
     if tgt is None:
         return int(k_valid[0])
 
@@ -223,6 +231,9 @@ def main():
             ic_candidates = env.IC_candidates
             num_P = env.num_P
 
+            # 获取 pursuer 位置（与 obs 生成器一致）
+            pos_p, _pos_e = env._positions_full_for_obs()
+
             for p in range(num_P):
                 if not active[p] or not np.any(mask[p]):
                     continue
@@ -241,14 +252,14 @@ def main():
                 )
                 # New: 8 维 + 角度周期
                 idx_new = _match_obs_index_8d(
-                    env, ic_candidates[hung_row], p, self_pts[p], mask[p]
+                    env, ic_candidates[hung_row], p, self_pts[p], mask[p], pos_p=pos_p
                 )
 
                 if idx_old == idx_new:
                     n_same_index += 1
 
                 # 计算 8 维 L1 误差
-                tgt = _ic_row_to_obs_node(env, ic_candidates[hung_row], p)
+                tgt = _ic_row_to_obs_node(env, ic_candidates[hung_row], p, pos_p=pos_p)
                 if tgt is None:
                     continue
 
@@ -306,7 +317,7 @@ def main():
                 if hung_row is None:
                     continue
                 idx = _match_obs_index_8d(
-                    env, ic_candidates[hung_row], p, self_pts[p], mask[p]
+                    env, ic_candidates[hung_row], p, self_pts[p], mask[p], pos_p=pos_p
                 )
                 if idx >= 0:
                     rule_idx[p] = idx

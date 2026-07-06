@@ -66,11 +66,22 @@ class SelfCtxHistoryBuffer:
 _COLS = CandidateColumns()
 
 
-def _ic_row_to_obs_node(env: TODCMARLEnv, row: np.ndarray, pid: int) -> Optional[np.ndarray]:
-    """把 IC 候选行映射为与 self_pts 对齐的 8 维节点。"""
+def _ic_row_to_obs_node(env: TODCMARLEnv, row: np.ndarray, pid: int, pos_p: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+    """把 IC 候选行映射为与 self_pts 对齐的 8 维节点。
+
+    theta 与 obs 生成器对齐：取从 P 指向候选点的方向角，
+    而非 _extract_candidate_pos 返回的 IsoPos/敌机朝向。
+    """
     if row.ndim != 1 or row.shape[0] <= _COLS.Delta_V:
         return None
-    c_x, c_y, theta = env._extract_candidate_pos(row, int(pid))
+    c_x, c_y, _raw_theta = env._extract_candidate_pos(row, int(pid))
+    # 与 obs 生成器 _build_c_nodes 一致：theta = arctan2(vec_y, vec_x)
+    if pos_p is not None:
+        p_x, p_y, p_th = float(pos_p[pid, 0]), float(pos_p[pid, 1]), float(pos_p[pid, 2])
+        vec_x, vec_y = c_x - p_x, c_y - p_y
+        theta = float(np.arctan2(vec_y, vec_x)) if (abs(vec_x) + abs(vec_y)) > 1e-9 else p_th
+    else:
+        theta = float(_raw_theta)
     return np.asarray(
         [
             float(c_x),
@@ -92,13 +103,14 @@ def _match_obs_index_for_ic_row(
     pid: int,
     self_pts_row: np.ndarray,
     mask_row: np.ndarray,
+    pos_p: Optional[np.ndarray] = None,
 ) -> int:
     """在某个 P 的 obs 子集中定位指定 IC 行对应的离散动作索引。"""
     k_valid = np.where(mask_row)[0]
     if k_valid.size == 0:
         return -1
 
-    tgt = _ic_row_to_obs_node(env, row, pid)
+    tgt = _ic_row_to_obs_node(env, row, pid, pos_p=pos_p)
     if tgt is None:
         return int(k_valid[0])
 
@@ -132,6 +144,9 @@ def _rule_actions_from_hungarian(
     self_pts = np.asarray(obs_np["self_pts"], dtype=np.float32)
 
     rule_idx = np.full(num_P, -1, dtype=np.int64)
+
+    # 获取 pursuer 位置（与 obs 生成器 _build_c_nodes 一致）
+    pos_p, _pos_e = env._positions_full_for_obs()
 
     # ── 快速路径：无候选 ──
     ic_candidates = env.IC_candidates
@@ -243,6 +258,7 @@ def _rule_actions_from_hungarian(
             pid=p,
             self_pts_row=self_pts[p],
             mask_row=mask[p],
+            pos_p=pos_p,
         )
         if best_k >= 0:
             rule_idx[p] = int(best_k)
