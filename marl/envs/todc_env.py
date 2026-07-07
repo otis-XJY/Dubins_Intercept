@@ -483,14 +483,11 @@ class TODCMARLEnv(gym.Env):
         while not np.all(self.Capflag_full) and (self.t_all < self.length_E_max /self.v_E):
             self._phase_update()
             self._advance_from_paths()
-            need_replan, terminal = self._phase_check_decision()
+            need_replan, terminal, _ = self._phase_check_decision()
             if terminal:
                 break
             if need_replan:
-                with _suppress_stdout_if(not self._planner_print):
-                    flagAllfallback = self._compute_isomap_intercept_candidates()
-                    self._apply_hungarian_and_paths(flagAllfallback)
-                self._sync_assigned_eid_full_from_pairs()
+                self._do_replan()
                 break
             self._update_capflag_full_from_geometry()  # reset 阶段不处理非匹配重规划
 
@@ -530,7 +527,7 @@ class TODCMARLEnv(gym.Env):
 
     def step(self, action_dict):
         """RL 对外一步：内层按 main0319，update -> _advance_from_paths -> _phase_check_decision 循环直至重规划或终止。"""
-        _, action_indices, obs_at_action = self._normalize_action(action_dict)
+        _, action_indices, obs_at_action = self._normalize_action(action_dict, return_norm=False)
         self._last_obs_at_action = obs_at_action
         self._last_action_indices = np.asarray(action_indices, dtype=np.int64).copy()
 
@@ -558,15 +555,12 @@ class TODCMARLEnv(gym.Env):
             self._tick_counter += 1
             if self._on_tick is not None:
                 self._on_tick(self, self._tick_counter)
-            need_replan, terminal = self._phase_check_decision()
+            need_replan, terminal, collision = self._phase_check_decision()
             if terminal:
-                stats.collision = bool(self._check_collision())
+                stats.collision = collision
                 break
             if need_replan:
-                with _suppress_stdout_if(not self._planner_print):
-                    flagAllfallback = self._compute_isomap_intercept_candidates()
-                    self._apply_hungarian_and_paths(flagAllfallback)
-                self._sync_assigned_eid_full_from_pairs()
+                self._do_replan()
                 stats.replanned = True
                 break
             _newly, _mismatch = self._update_capflag_full_from_geometry()
@@ -578,10 +572,7 @@ class TODCMARLEnv(gym.Env):
                 self._advance_from_paths(record_history=False)
                 if np.all(self.Capflag_full):
                     break
-                with _suppress_stdout_if(not self._planner_print):
-                    flagAllfallback = self._compute_isomap_intercept_candidates()
-                    self._apply_hungarian_and_paths(flagAllfallback)
-                self._sync_assigned_eid_full_from_pairs()
+                self._do_replan()
                 stats.replanned = True
                 break
 
@@ -594,8 +585,9 @@ class TODCMARLEnv(gym.Env):
         self.episode_step += 1
         delta_t_all = float(self.t_all) - t_all_before
 
+        curr_obs = self._build_obs()
         rewards, reward_details = self._compute_rewards(
-            action_indices, sim_time_elapsed=delta_t_all, obs_at_action=obs_at_action
+            action_indices, sim_time_elapsed=delta_t_all, obs_at_action=obs_at_action, curr_obs=curr_obs
         )
         asset_breached = self._check_asset_breach()
         self.reward_fn.apply_terminal_rewards(
@@ -628,7 +620,7 @@ class TODCMARLEnv(gym.Env):
                   f"Capflag_full={self.Capflag_full.tolist()} "
                   f"pairs_remaining={0 if self.pairs_realE2P is None else self.pairs_realE2P.shape[0]}")
 
-        obs = self._build_obs()
+        obs = curr_obs
         self._sync_dynamic_k(obs)
         self._last_obs = obs
         terminations = {f"p_{i}": done_all for i in range(self.num_P)}
@@ -1100,6 +1092,16 @@ class TODCMARLEnv(gym.Env):
 
     # --- main0319 内层单步分解：update -> _advance_from_paths -> check（Gym 的 step(action) 仍是对外 RL 接口）---
 
+    def _do_replan(self) -> None:
+        """执行一次重规划：IsoMap 候选生成 + 匈牙利分配 + 路径应用 + 分配同步。
+
+        step 内 need_replan 分支与 mismatch 分支共用此流程，避免代码重复。
+        """
+        with _suppress_stdout_if(not self._planner_print):
+            flagAllfallback = self._compute_isomap_intercept_candidates()
+            self._apply_hungarian_and_paths(flagAllfallback)
+        self._sync_assigned_eid_full_from_pairs()
+
     def _drop_captured_pairs(self, log_context: str) -> int:
         """按 Capflag_full 过滤已捕获配对，并同步 UnCap*New 与 assigned_eid_full。"""
         if self.Capflag_full is None:
@@ -1135,26 +1137,29 @@ class TODCMARLEnv(gym.Env):
         self._drop_captured_pairs(log_context="PHASE_UPDATE")
 
 
-    def _phase_check_decision(self) -> Tuple[bool, bool]:
-        """碰撞/资产/全捕获与 DWA（main0319:258-264）。返回 (need_replan, terminal)。"""
+    def _phase_check_decision(self) -> Tuple[bool, bool, bool]:
+        """碰撞/资产/全捕获与 DWA（main0319:258-264）。返回 (need_replan, terminal, collision)。
+
+        ``collision`` 表示终止是否因追捕者碰撞；step 据此设置 stats 而无需重复调用 _check_collision。
+        """
         if self._check_collision():
             print(f"[PHASE_CHECK] tick={self._tick_counter} t_all={self.t_all:.3f} → terminal: pursuer_collision")
-            return False, True
+            return False, True, True
         if self._check_asset_breach():
             print(f"[PHASE_CHECK] tick={self._tick_counter} t_all={self.t_all:.3f} → terminal: asset_breached")
-            return False, True
+            return False, True, False
 
         if self.num_E > 0 and np.all(self.Capflag_full):
             print(f"[PHASE_CHECK] tick={self._tick_counter} t_all={self.t_all:.3f} → terminal: all_captured, "
                   f"Capflag_full={self.Capflag_full.tolist()}")
-            return False, True
+            return False, True, False
         need_replan = False
         if self.enable_dwa_replan:
             # pos_e, path_pre = self._dwa_pos_e_and_path_pre()
             min_dists, _ = obtainDWAprePath(self.PosE, self.PathEpre, self.E_PreRef)
             # TODO:测试这个数值
             need_replan = not bool(np.all(min_dists <= 50))
-        return need_replan, False
+        return need_replan, False, False
 
     def _pos_p_xyz_for_global_pid(self, pid: int) -> Tuple[float, float, float]:
         """全局 pid → 平面位置+朝向；PosP 紧凑时用 UnCapPidNew 行映射。"""
@@ -1418,7 +1423,7 @@ class TODCMARLEnv(gym.Env):
             raise ValueError("pairs_realE2P is None")
         if obs is None:
             obs = self._build_obs()
-        self._sync_dynamic_k(obs)
+            self._sync_dynamic_k(obs)
         mask = np.asarray(obs["self_pts_mask"], dtype=np.float32)
         cols = self.obs_generator.cols
         assigned_rows = []
@@ -1546,12 +1551,13 @@ class TODCMARLEnv(gym.Env):
             capflag=self.Capflag_full,
         )
 
-    def _normalize_action(self, action_dict) -> Tuple[np.ndarray, np.ndarray, Dict[str, np.ndarray]]:
+    def _normalize_action(self, action_dict, return_norm: bool = True) -> Tuple[Optional[np.ndarray], np.ndarray, Dict[str, np.ndarray]]:
         """解析策略输出：返回 (one-hot 权重, 每智能体离散索引, 决策时刻观测快照)。
 
         训练脚本通常传入 **采样后的索引** ``(num_P,)`` int；亦兼容 logits/概率矩阵。
         无任务机（``pursuer_active[i]==0``）：**动作索引为 -1**，``norm`` 对应行为全零。
         快照用于计奖：仿真内层可能重规划并改变候选数 K，必须与选动作时的 mask 一致。
+        ``return_norm=False`` 时跳过 one-hot 矩阵分配（step 内不需要该返回值）。
         """
         obs = self._build_obs()
         self._sync_dynamic_k(obs)
@@ -1596,7 +1602,6 @@ class TODCMARLEnv(gym.Env):
         if active.shape[0] != self.num_P:
             raise ValueError(f"pursuer_active 长度应为 {self.num_P}，实际 {active.shape}")
 
-        norm = np.zeros((self.num_P, k_curr), dtype=np.float32)
         for i in range(self.num_P):
             if int(active[i]) == 0:
                 idx[i] = -1
@@ -1607,7 +1612,13 @@ class TODCMARLEnv(gym.Env):
             sel = int(idx[i])
             if sel < 0 or sel >= k_curr or mask[i, sel] <= 0:
                 raise ValueError(f"invalid normalized action index {sel} for pursuer {i} (k={k_curr})")
-            norm[i, sel] = 1.0
+        norm = None
+        if return_norm:
+            norm = np.zeros((self.num_P, k_curr), dtype=np.float32)
+            for i in range(self.num_P):
+                if int(active[i]) == 0:
+                    continue
+                norm[i, int(idx[i])] = 1.0
         return norm, idx, obs
 
     def _compute_rewards(
@@ -1615,10 +1626,15 @@ class TODCMARLEnv(gym.Env):
         action_indices: np.ndarray,
         sim_time_elapsed: float,
         obs_at_action: Dict[str, np.ndarray],
+        curr_obs: Optional[Dict[str, np.ndarray]] = None,
     ):
-        """`action_indices` 相对于 ``obs_at_action`` 中的候选掩码；几何类项用当前态势。"""
+        """`action_indices` 相对于 ``obs_at_action`` 中的候选掩码；几何类项用当前态势。
+
+        ``curr_obs`` 为当前几何态势观测；传入时复用以避免与 step 末尾重复构建。
+        """
         curr_min_dist = self._compute_curr_min_dist_stable()
-        curr_obs = self._build_obs()
+        if curr_obs is None:
+            curr_obs = self._build_obs()
         obs = dict(curr_obs)
         for key in ("reward_nodes", "self_pts_mask", "self_pts", "pursuer_active"):
             obs[key] = obs_at_action[key]

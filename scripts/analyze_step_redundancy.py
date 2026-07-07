@@ -106,16 +106,15 @@ def main():
             if c > 0:
                 print(f"    {name}: {c}")
 
-    print("\n=== 冗余分析结论（与上面统计对照）===")
-    print("R1. _build_obs: 单步预期 3 次 = _normalize_action(1) + _compute_rewards(1) + step末尾(1)")
-    print("    其中 _compute_rewards 与 step 末尾的 _build_obs 状态相同（内层循环结束后未变），重复构建。")
-    print("R2. _sync_dynamic_k: 单步预期 3 次 = _normalize_action(1) + _apply_assignment_from_action(1) + step末尾(1)")
-    print("    其中 _apply_assignment_from_action 内的 1 次冗余（obs 来自 _normalize_action，k_max 已同步）。")
-    print("R3. _check_collision: 若该步 terminal，_phase_check_decision 已调用过，step 563 行再调 1 次（重复）。")
-    print("R4. _check_asset_breach: _phase_check_decision 内已调用，step 600 行可能再调 1 次（重复）。")
-    print("R5. _normalize_action 返回的 norm(one-hot 矩阵) 在 step 中被 '_' 丢弃，构建冗余（仅 test 用到）。")
-    print("R6. need_replan 分支与 mismatch 分支的重规划代码（_compute_isomap_intercept_candidates")
-    print("    + _apply_hungarian_and_paths + _sync_assigned_eid_full_from_pairs）完全重复，可抽取 _do_replan()。")
+    print("\n=== 优化后预期（与上面统计对照）===")
+    print("R1. _build_obs: 优化后 2 次 = _normalize_action(1) + step 内 curr_obs(1)")
+    print("    _compute_rewards 复用 curr_obs，step 末尾复用 curr_obs，各省 1 次。")
+    print("R2. _sync_dynamic_k: 优化后 2 次 = _normalize_action(1) + step末尾(1)")
+    print("    _apply_assignment_from_action 在 obs 非 None 时跳过冗余同步。")
+    print("R3. _check_collision: 优化后非 terminal 步仍 3 次（内层）；terminal 步省 1（_phase_check_decision 返回 collision）。")
+    print("R4. _check_asset_breach: 仍 4 次（保留 step 600 行独立检测以服务于奖励正确性，未优化）。")
+    print("R5. _normalize_action: step 传 return_norm=False，跳过 one-hot 矩阵分配（调用次数不变，但省分配）。")
+    print("R6. need_replan / mismatch 分支统一走 _do_replan()，代码去重（调用次数不变）。")
 
 
 if __name__ == "__main__":
