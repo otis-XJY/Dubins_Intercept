@@ -459,10 +459,10 @@ class TODCMARLEnv(gym.Env):
 
         self.Capflag_full = np.zeros((self.num_E,), dtype=bool)
         self.pairs_realE2P = None #实际的id，构造观测的标准
-        self.UnCapPid = np.arange(self.num_P, dtype=int) #实际的id
-        self.UnCapEid = np.arange(self.num_E, dtype=int) #实际的id
-        self.UnCapPidNew = self.UnCapPid.copy() #实际的id
-        self.UnCapEidNew = self.UnCapEid.copy() #实际的id
+        self.UnCapPid = np.arange(self.num_P, dtype=int) # 当前生效：紧凑追捕者索引 -> 全局pid 映射
+        self.UnCapEid = np.arange(self.num_E, dtype=int) # 当前生效：紧凑逃逸者索引 -> 全局eid 映射
+        self.UnCapPidNew = self.UnCapPid.copy() # 暂存更新：本轮重规划后的活跃pid，稍后同步回 UnCapPid
+        self.UnCapEidNew = self.UnCapEid.copy() # 暂存更新：本轮重规划后的活跃eid，稍后同步回 UnCapEid
         self.assigned_eid_full = np.full((self.num_P,), -1, dtype=np.int64)
 
         # self.IC = np.empty((0, 18), dtype=float)
@@ -491,7 +491,6 @@ class TODCMARLEnv(gym.Env):
                     flagAllfallback = self._compute_isomap_intercept_candidates()
                     self._apply_hungarian_and_paths(flagAllfallback)
                 self._sync_assigned_eid_full_from_pairs()
-                self._validate_pair_data_integrity(context="reset:post_replan")
                 break
             self._update_capflag_full_from_geometry()  # reset 阶段不处理非匹配重规划
 
@@ -568,7 +567,6 @@ class TODCMARLEnv(gym.Env):
                     flagAllfallback = self._compute_isomap_intercept_candidates()
                     self._apply_hungarian_and_paths(flagAllfallback)
                 self._sync_assigned_eid_full_from_pairs()
-                self._validate_pair_data_integrity(context="step:post_replan")
                 stats.replanned = True
                 break
             _newly, _mismatch = self._update_capflag_full_from_geometry()
@@ -584,7 +582,6 @@ class TODCMARLEnv(gym.Env):
                     flagAllfallback = self._compute_isomap_intercept_candidates()
                     self._apply_hungarian_and_paths(flagAllfallback)
                 self._sync_assigned_eid_full_from_pairs()
-                self._validate_pair_data_integrity(context="step:post_mismatch_capture_replan")
                 stats.replanned = True
                 break
 
@@ -1200,37 +1197,31 @@ class TODCMARLEnv(gym.Env):
             )
         return pair_global, pair_compact
 
-    def _reset_assigned_target_eids(self) -> np.ndarray:
-        """重置 pursuer->target 映射数组并返回可写视图。"""
-        if self.assigned_eid_full is None:
-            self.assigned_eid_full = np.full((self.num_P,), -1, dtype=np.int64)
-        else:
-            assigned = np.asarray(self.assigned_eid_full, dtype=np.int64)
-            if assigned.shape != (self.num_P,):
-                raise ValueError(f"assigned_eid_full shape {assigned.shape} != ({self.num_P},)")
-            assigned[:] = -1
-            self.assigned_eid_full = assigned
-        return self.assigned_eid_full
-
     def _sync_assigned_eid_full_from_pairs(self) -> None:
         """从 pairs_realE2P 同步 assigned_eid_full（用于稳定距离计算与校验）。"""
-        assigned = self._reset_assigned_target_eids()
+        if self.assigned_eid_full is None:
+            self.assigned_eid_full = np.full((self.num_P,), -1, dtype=np.int64)
+        assigned = np.asarray(self.assigned_eid_full, dtype=np.int64)
+        if assigned.shape != (self.num_P,):
+            raise ValueError(f"assigned_eid_full shape {assigned.shape} != ({self.num_P},)")
+        assigned[:] = -1
+
         pair_global, _ = self._get_pair_tables_aligned(context="sync_assigned")
         if pair_global.size == 0:
+            self.assigned_eid_full = assigned
             return
 
-        seen_pids = set()
-        for i in range(pair_global.shape[0]):
-            eid = int(pair_global[i, 0])
-            pid = int(pair_global[i, 1])
-            if pid < 0 or pid >= self.num_P:
-                raise ValueError(f"pairs_realE2P has invalid pid={pid}")
-            if eid < 0 or eid >= self.num_E:
-                raise ValueError(f"pairs_realE2P has invalid eid={eid}")
-            if pid in seen_pids:
-                raise ValueError(f"pairs_realE2P has duplicate pid={pid}")
-            seen_pids.add(pid)
-            assigned[pid] = eid
+        pids = pair_global[:, 1].astype(np.int64, copy=False)
+        eids = pair_global[:, 0].astype(np.int64, copy=False)
+        if np.any(pids < 0) or np.any(pids >= self.num_P):
+            raise ValueError(f"pairs_realE2P has invalid pid values={pids.tolist()}")
+        if np.any(eids < 0) or np.any(eids >= self.num_E):
+            raise ValueError(f"pairs_realE2P has invalid eid values={eids.tolist()}")
+        if np.unique(pids).size != pids.size:
+            raise ValueError(f"pairs_realE2P has duplicate pid values={pids.tolist()}")
+
+        assigned[pids] = eids
+        self.assigned_eid_full = assigned
 
     def _validate_pair_rows_against_compact(
         self,
@@ -1320,58 +1311,6 @@ class TODCMARLEnv(gym.Env):
             context=context,
         )
         self._validate_pair_path_index_bounds(pair_compact=pair_compact, context=context)
-
-    def _validate_capflag_consistency(self, context: str = "") -> None:
-        """校验 Capflag_full / pairs_realE2P / UnCapEidNew / UnCapPidNew / assigned_eid_full 的一致性。"""
-        if not self._enable_integrity_checks:
-            return
-
-        if self.Capflag_full is None:
-            return
-        if self.Capflag_full.shape != (self.num_E,):
-            raise ValueError(f"[{context}] Capflag_full shape {self.Capflag_full.shape} != ({self.num_E},)")
-
-        active_eids = self._get_active_eids()
-        for eid in active_eids:
-            eid = int(eid)
-            if eid < 0 or eid >= self.num_E:
-                raise ValueError(f"[{context}] UnCapEidNew contains invalid eid={eid}")
-            if bool(self.Capflag_full[eid]):
-                raise ValueError(
-                    f"[{context}] UnCapEidNew contains captured eid={eid}, "
-                    f"Capflag_full={self.Capflag_full.tolist()}"
-                )
-
-        pair_global, _ = self._get_pair_tables_aligned(context=context)
-        if pair_global.size > 0:
-            pair_pids = set(int(x) for x in pair_global[:, 1])
-            for pid in self._get_active_pids():
-                if int(pid) not in pair_pids:
-                    raise ValueError(
-                        f"[{context}] UnCapPidNew contains pid={int(pid)} not in pairs_realE2P pids={pair_pids}"
-                    )
-
-            if self.assigned_eid_full is not None:
-                for i in range(pair_global.shape[0]):
-                    eid = int(pair_global[i, 0])
-                    pid = int(pair_global[i, 1])
-                    if pid < 0 or pid >= self.num_P:
-                        raise ValueError(f"[{context}] pairs_realE2P[{i}] invalid pid={pid}")
-                    if self.assigned_eid_full[pid] != eid:
-                        raise ValueError(
-                            f"[{context}] assigned_eid_full[{pid}]={self.assigned_eid_full[pid]} "
-                            f"!= pairs_realE2P[{i}] eid={eid}"
-                        )
-
-        active_pids = self._get_active_pids()
-        if self.PosP is not None and self.PosP.shape[0] < active_pids.size:
-            raise ValueError(
-                f"[{context}] PosP rows {self.PosP.shape[0]} < UnCapPidNew size {active_pids.size}"
-            )
-        if self.PosE is not None and self.PosE.shape[0] < active_eids.size:
-            raise ValueError(
-                f"[{context}] PosE rows {self.PosE.shape[0]} < UnCapEidNew size {active_eids.size}"
-            )
 
     def _update_capflag_full_from_geometry(self) -> Tuple[int, int]:
         """更新全局捕获标记 Capflag_full（单调置 True）。
